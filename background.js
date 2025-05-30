@@ -1,4 +1,4 @@
-if (typeof browser === 'undefined') {
+if (typeof browser === "undefined") {
   var browser = chrome;
 }
 
@@ -7,20 +7,24 @@ if (browser.browserAction) {
   browser.action = browser.browserAction;
 }
 
-var Authentication = (function() {
+var Authentication = (function () {
   var credentials = [];
-  
+
   function init(proxyData) {
     credentials = proxyData || [];
-    console.log("Authentication initialized with", credentials.length, "proxies");
-    
+    console.log(
+      "Authentication initialized with",
+      credentials.length,
+      "proxies"
+    );
+
     // Set up webRequest listener for authentication
     if (browser.webRequest && browser.webRequest.onAuthRequired) {
       // Remove existing listener if any
       if (browser.webRequest.onAuthRequired.hasListener(handleAuthRequired)) {
         browser.webRequest.onAuthRequired.removeListener(handleAuthRequired);
       }
-      
+
       // Add new listener
       browser.webRequest.onAuthRequired.addListener(
         handleAuthRequired,
@@ -29,10 +33,10 @@ var Authentication = (function() {
       );
     }
   }
-  
+
   function handleAuthRequired(details) {
     console.log("Auth required for:", details.url);
-    
+
     // Find matching credentials for this proxy
     for (var i = 0; i < credentials.length; i++) {
       var cred = credentials[i];
@@ -41,17 +45,17 @@ var Authentication = (function() {
         return {
           authCredentials: {
             username: cred.username,
-            password: cred.password
-          }
+            password: cred.password,
+          },
         };
       }
     }
-    
+
     // No credentials found
     console.log("No credentials found for auth request");
     return {};
   }
-  
+
   function clear() {
     credentials = [];
     if (browser.webRequest && browser.webRequest.onAuthRequired) {
@@ -61,15 +65,15 @@ var Authentication = (function() {
     }
     console.log("Authentication cleared");
   }
-  
+
   return {
     init: init,
-    clear: clear
+    clear: clear,
   };
 })();
 
 // === ON-REQUEST MODULE ===
-var OnRequest = (function() {
+var OnRequest = (function () {
   var mode = "";
   var proxy = {};
   var isInitialized = false;
@@ -78,11 +82,14 @@ var OnRequest = (function() {
   // Initialize proxy listener
   function initializeListener() {
     if (!isListenerAdded && browser.proxy && browser.proxy.onRequest) {
-      browser.proxy.onRequest.addListener(function(e) {
-        return OnRequest.process(e);
-      }, {
-        urls: ["<all_urls>"],
-      });
+      browser.proxy.onRequest.addListener(
+        function (e) {
+          return OnRequest.process(e);
+        },
+        {
+          urls: ["<all_urls>"],
+        }
+      );
       isListenerAdded = true;
       console.log("Proxy listener initialized");
     }
@@ -91,15 +98,19 @@ var OnRequest = (function() {
   // Load settings from storage
   async function loadSettings() {
     try {
-      const result = await browser.storage.local.get(['proxyMode', 'proxyData']);
+      const result = await browser.storage.local.get([
+        "proxyMode",
+        "proxyData",
+      ]);
       if (result.proxyMode && result.proxyData) {
         mode = result.proxyMode;
-        const data = result.proxyData.filter(function(i) {
+        const data = result.proxyData.filter(function (i) {
           return i.type !== "pac" && i.hostname;
         });
-        proxy = /:\d+[^/]*$/.test(result.proxyMode) &&
-          data.find(function(i) {
-            return result.proxyMode === (i.hostname + ":" + i.port);
+        proxy =
+          /:\d+[^/]*$/.test(result.proxyMode) &&
+          data.find(function (i) {
+            return result.proxyMode === i.hostname + ":" + i.port;
           });
         isInitialized = true;
         console.log("Proxy settings loaded from storage:", mode, proxy);
@@ -114,7 +125,7 @@ var OnRequest = (function() {
     try {
       await browser.storage.local.set({
         proxyMode: pref.mode,
-        proxyData: pref.data
+        proxyData: pref.data,
       });
       console.log("Proxy settings saved to storage");
     } catch (error) {
@@ -127,18 +138,19 @@ var OnRequest = (function() {
     async init(pref) {
       // Save to storage first
       await saveSettings(pref);
-      
+
       // Update current settings
       mode = pref.mode;
-      const data = pref.data.filter(function(i) {
+      const data = pref.data.filter(function (i) {
         return i.type !== "pac" && i.hostname;
       });
 
-      proxy = /:\d+[^/]*$/.test(pref.mode) &&
-        data.find(function(i) {
-          return pref.mode === (i.hostname + ":" + i.port);
+      proxy =
+        /:\d+[^/]*$/.test(pref.mode) &&
+        data.find(function (i) {
+          return pref.mode === i.hostname + ":" + i.port;
         });
-      
+
       isInitialized = true;
       console.log("Proxy initialized:", mode, proxy);
     },
@@ -149,7 +161,7 @@ var OnRequest = (function() {
         loadSettings();
         return { type: "direct" };
       }
-      
+
       return this.processProxy(proxy);
     },
 
@@ -160,18 +172,18 @@ var OnRequest = (function() {
       var username = proxyData && proxyData.username;
       var password = proxyData && proxyData.password;
       var proxyDNS = proxyData && proxyData.proxyDNS;
-      
+
       if (!type || type === "direct") {
         return { type: "direct" };
       }
 
       var response = { type: type, host: host, port: parseInt(port) };
-      
+
       // Handle SOCKS5 type
       if (response.type === "socks5") {
         response.type = "socks";
       }
-      
+
       // Set proxyDNS for SOCKS
       if (type.startsWith("socks")) {
         response.proxyDNS = !!proxyDNS;
@@ -194,7 +206,7 @@ var OnRequest = (function() {
       mode = "";
       proxy = {};
       isInitialized = false;
-      await browser.storage.local.remove(['proxyMode', 'proxyData']);
+      await browser.storage.local.remove(["proxyMode", "proxyData"]);
       console.log("Proxy settings cleared");
     },
 
@@ -203,7 +215,7 @@ var OnRequest = (function() {
       return {
         mode: mode,
         proxy: proxy,
-        isActive: !!proxy && proxy.type !== "direct"
+        isActive: !!proxy && proxy.type !== "direct",
       };
     },
 
@@ -211,7 +223,7 @@ var OnRequest = (function() {
     loadSettings: loadSettings,
 
     // Initialize listener method for external use
-    initializeListener: initializeListener
+    initializeListener: initializeListener,
   };
 })();
 
@@ -232,7 +244,11 @@ function sendMessageForPopup(message, data) {
   }
 }
 
-browser.runtime.onMessage.addListener(async function(request, sender, sendResponse) {
+browser.runtime.onMessage.addListener(async function (
+  request,
+  sender,
+  sendResponse
+) {
   try {
     switch (request.greeting) {
       case "getLocationsData":
@@ -286,27 +302,24 @@ browser.runtime.onMessage.addListener(async function(request, sender, sendRespon
 });
 
 // Initialize OnRequest when background script loads
-OnRequest.loadSettings().then(function() {
+OnRequest.loadSettings().then(function () {
   OnRequest.initializeListener();
 });
 
-var getInfoKey = async function(data) {
+var getInfoKey = async function (data) {
   var url = SERVER + "/webservice/statusIP?key=" + data.apiKey;
   var result = await callRequest(url);
   if (result.code == 200) {
     sendMessageForPopup("successGetInfoKey", result);
     return result.data;
   }
-  sendMessageForPopup(
-    "failureGetProxyInfo",
-    {
-      error: result.status == 500 ? "Kết Nối Thất Bại" : result.message,
-    }
-  );
+  sendMessageForPopup("failureGetProxyInfo", {
+    error: result.status == 500 ? "Kết Nối Thất Bại" : result.message,
+  });
   return result;
 };
 
-var startThreadAutoChangeIp = async function(data) {
+var startThreadAutoChangeIp = async function (data) {
   if (data.timeAutoChangeIP > 0) {
     browser.storage.sync.set({ TIME_CHANGE_IP: data.timeAutoChangeIP });
   }
@@ -326,21 +339,26 @@ var startThreadAutoChangeIp = async function(data) {
 
       cancelSleep = await sleep(timer * 1000);
       if (isRunningAutoChange) {
-        var newProxyData = await getChangeIpApiPrime(data.apiKey, data.type);
-        if (newProxyData && newProxyData.code === 200) {
-          await handleProxyResponse(newProxyData.data, data.apiKey, data.proxyType);
-        } else {
-          sendMessageForPopup(
-            "failureGetProxyInfo",
-            {
+        timer--;
+        sendMessageForPopup("disconnectProxy", {});
+        setTimeout(async () => {
+          var newProxyData = await getChangeIpApiPrime(data.apiKey, data.type);
+          if (newProxyData && newProxyData.code === 200) {
+            await handleProxyResponse(
+              newProxyData.data,
+              data.apiKey,
+              data.proxyType
+            );
+          } else {
+            sendMessageForPopup("failureGetProxyInfo", {
               error:
                 newProxyData && newProxyData.code == 500
                   ? "Kết Nối Thất Bại"
-                  : (newProxyData && newProxyData.message) || "Lỗi không xác định",
-            }
-          );
-        }
-        timer--;
+                  : (newProxyData && newProxyData.message) ||
+                    "Lỗi không xác định",
+            });
+          }
+        }, 2000);
       }
     }
   } else {
@@ -356,38 +374,38 @@ var startThreadAutoChangeIp = async function(data) {
   }
 };
 
-var sleep = function(timeout) {
-  return new Promise(function(resolve, reject) {
-    var timer = setTimeout(function() {
+var sleep = function (timeout) {
+  return new Promise(function (resolve, reject) {
+    var timer = setTimeout(function () {
       if (!isCancelled) {
         resolve();
       }
     }, timeout);
 
-    return function() {
+    return function () {
       isCancelled = true;
       clearTimeout(timer);
     };
   });
 };
 
-var getChangeIpApiPrime = async function(apiKey) {
+var getChangeIpApiPrime = async function (apiKey) {
   var url = SERVER + "/webservice/changeIP?key=" + apiKey;
   var result = await callRequest(url);
 
   if (result && result.code === 200) {
     return result;
   }
-  sendMessageForPopup(
-    "failureGetProxyInfo",
-    {
-      error: result && result.status == 500 ? "Kết Nối Thất Bại" : (result && result.message) || "Lỗi kết nối",
-    }
-  );
+  sendMessageForPopup("failureGetProxyInfo", {
+    error:
+      result && result.status == 500
+        ? "Kết Nối Thất Bại"
+        : (result && result.message) || "Lỗi kết nối",
+  });
   return result;
 };
 
-var handleChangeLocationProxy = async function(apiKey, location, proxyType) {
+var handleChangeLocationProxy = async function (apiKey, location, proxyType) {
   var response = await getChangeLocationApi(apiKey, location);
   if (response && response.status === 500) {
     return;
@@ -395,7 +413,7 @@ var handleChangeLocationProxy = async function(apiKey, location, proxyType) {
   await handleProxyResponse(response, apiKey, proxyType);
 };
 
-var getChangeLocationApi = async function(apiKey, location) {
+var getChangeLocationApi = async function (apiKey, location) {
   var url = SERVER + "/webservice/changeIP?key=" + apiKey;
 
   if (location) {
@@ -407,16 +425,16 @@ var getChangeLocationApi = async function(apiKey, location) {
   if (result && result.code === 200) {
     return result.data;
   }
-  sendMessageForPopup(
-    "failureGetProxyInfo",
-    {
-      error: result && result.status == 500 ? "Kết Nối Thất Bại" : (result && result.message) || "Lỗi kết nối",
-    }
-  );
+  sendMessageForPopup("failureGetProxyInfo", {
+    error:
+      result && result.status == 500
+        ? "Kết Nối Thất Bại"
+        : (result && result.message) || "Lỗi kết nối",
+  });
   return result;
 };
 
-var handleChangeIpProxy = async function(apiKey, location, proxyType) {
+var handleChangeIpProxy = async function (apiKey, location, proxyType) {
   sendMessageForPopup("showProcessingNewIpConnect", {});
   var response = await getChangeIpApi(apiKey, location);
   if (response && response.status === 500) {
@@ -425,7 +443,7 @@ var handleChangeIpProxy = async function(apiKey, location, proxyType) {
   await handleProxyResponse(response, apiKey, proxyType);
 };
 
-var getChangeIpApi = async function(apiKey, location) {
+var getChangeIpApi = async function (apiKey, location) {
   var url = SERVER + "/webservice/changeIP?key=" + apiKey;
 
   if (location) {
@@ -437,12 +455,12 @@ var getChangeIpApi = async function(apiKey, location) {
   if (result && result.code === 200) {
     return result.data;
   }
-  sendMessageForPopup(
-    "failureGetProxyInfo",
-    {
-      error: result && result.status == 500 ? "Kết Nối Thất Bại" : (result && result.message) || "Lỗi kết nối",
-    }
-  );
+  sendMessageForPopup("failureGetProxyInfo", {
+    error:
+      result && result.status == 500
+        ? "Kết Nối Thất Bại"
+        : (result && result.message) || "Lỗi kết nối",
+  });
 
   return result;
 };
@@ -451,32 +469,29 @@ function deleteAlarm(name) {
   browser.alarms.clear(name);
 }
 
-var handleDisconnectProxy = async function(apiKey, whitelist_ip) {
+var handleDisconnectProxy = async function (apiKey, whitelist_ip) {
   disconnectProxyApi(apiKey, whitelist_ip);
 };
 
-var disconnectProxyApi = async function(apiKey) {
+var disconnectProxyApi = async function (apiKey) {
   return true;
 };
 
-var getLocations = async function() {
+var getLocations = async function () {
   var url = SERVER + "/webservice/getLocation";
   var result = await callRequest(url);
   if (result && result.code === 200) {
     sendMessageForPopup("getLocationsSuccess", result.data);
     return result.data;
   }
-  sendMessageForPopup(
-    "failureGetProxyInfo",
-    {
-      error: "Kết Nối Thất Bại",
-    }
-  );
+  sendMessageForPopup("failureGetProxyInfo", {
+    error: "Kết Nối Thất Bại",
+  });
   return result;
 };
 
-var callRequest = async function(url, headers) {
-  return new Promise(function(resolve, reject) {
+var callRequest = async function (url, headers) {
+  return new Promise(function (resolve, reject) {
     var header = {
       method: "GET",
       mode: "cors",
@@ -485,11 +500,13 @@ var callRequest = async function(url, headers) {
 
     try {
       fetch(url, header)
-        .then(function(response) { return response.json(); })
-        .then(function(data) {
+        .then(function (response) {
+          return response.json();
+        })
+        .then(function (data) {
           return resolve(data);
         })
-        .catch(function(error) {
+        .catch(function (error) {
           console.error("Fetch error:", error);
           return resolve(null);
         });
@@ -501,23 +518,23 @@ var callRequest = async function(url, headers) {
 };
 
 // Set direct proxy properly
-var setDirectProxy = async function() {
+var setDirectProxy = async function () {
   try {
     // Clear OnRequest proxy
     await OnRequest.clearProxy();
-    
+
     // Clear browser proxy settings
     if (browser.proxy && browser.proxy.settings) {
       await browser.proxy.settings.clear({});
     }
-    
+
     // Clear authentication
     Authentication.clear();
-    
+
     // Update UI and storage
     setBadgeOff();
     await browser.storage.sync.set({ tx_proxy: null });
-    
+
     console.log("Proxy set to direct");
   } catch (error) {
     console.error("Error setting direct proxy:", error);
@@ -525,21 +542,21 @@ var setDirectProxy = async function() {
 };
 
 // LEGACY function for compatibility
-var direct = function() {
+var direct = function () {
   setDirectProxy();
 };
 
-var setBadgeOff = function() {
+var setBadgeOff = function () {
   browser.action.setBadgeBackgroundColor({ color: [162, 36, 36, 255] });
   browser.action.setBadgeText({ text: "OFF" });
 };
 
-var setBadgeOn = function(location) {
+var setBadgeOn = function (location) {
   browser.action.setBadgeBackgroundColor({ color: [36, 162, 36, 255] });
   browser.action.setBadgeText({ text: "ON" });
 };
 
-var stopThreadAutoChangeIp = function() {
+var stopThreadAutoChangeIp = function () {
   isRunningAutoChange = false;
   if (cancelSleep) {
     var cancel = cancelSleep();
@@ -552,7 +569,7 @@ var stopThreadAutoChangeIp = function() {
   }
 };
 
-var handleGetCurrentProxy = async function(apiKey, proxyType) {
+var handleGetCurrentProxy = async function (apiKey, proxyType) {
   sendMessageForPopup("processingGetProxyInfo", {});
   var response = await getCurrentProxyApi(apiKey);
   if (response && response.status === 500) {
@@ -562,20 +579,20 @@ var handleGetCurrentProxy = async function(apiKey, proxyType) {
 };
 
 // Actually set proxy instead of just sending message
-var handleProxyResponse = async function(response, apiKey, proxyType) {
+var handleProxyResponse = async function (response, apiKey, proxyType) {
   if (!response || (!response.ipv4 && !response.ipv6)) {
-    sendMessageForPopup(
-      "failureGetProxyInfo",
-      {
-        error: response && response.code == 500 ? "Kết Nối Thất Bại" : (response && response.message) || "Không thể lấy thông tin proxy",
-      }
-    );
+    sendMessageForPopup("failureGetProxyInfo", {
+      error:
+        response && response.code == 500
+          ? "Kết Nối Thất Bại"
+          : (response && response.message) || "Không thể lấy thông tin proxy",
+    });
     return;
   }
 
   var portV4 = "";
   var portV6 = "";
-  
+
   if (response.ipv4) {
     var ipv4Parts = response.ipv4.split(":");
     portV4 = ipv4Parts.length >= 2 ? ipv4Parts[ipv4Parts.length - 1] : "";
@@ -603,7 +620,8 @@ var handleProxyResponse = async function(response, apiKey, proxyType) {
     password: response.credential && response.credential.password,
     proxyTimeout: response.proxyTimeout,
     nextChangeIP: response.nextChangeIP,
-    nextTime: Math.floor(Date.now() / 1000) + parseInt(response.nextChangeIP || 0),
+    nextTime:
+      Math.floor(Date.now() / 1000) + parseInt(response.nextChangeIP || 0),
     location: response.location,
     apiKey: apiKey,
     port:
@@ -611,80 +629,83 @@ var handleProxyResponse = async function(response, apiKey, proxyType) {
         ? parseInt(portV4)
         : proxyType == "ipv6" && portV6
         ? parseInt(portV6)
-        : portV4 ? parseInt(portV4) : parseInt(portV6), // Default to IPv4 if available
+        : portV4
+        ? parseInt(portV4)
+        : parseInt(portV6), // Default to IPv4 if available
     type: response.proxyType || "http",
   };
 
   if (!proxyInfo.public_ip || !proxyInfo.port) {
-    sendMessageForPopup(
-      "failureGetProxyInfo",
-      {
-        error: "Không thể lấy thông tin proxy",
-      }
-    );
+    sendMessageForPopup("failureGetProxyInfo", {
+      error: "Không thể lấy thông tin proxy",
+    });
     return;
   }
 
   // Actually set the proxy
   await setProxySettings(proxyInfo);
-  
+
   // Send success message to popup
   sendMessageForPopup("successGetProxyInfo", proxyInfo);
 };
 
 // Function to actually set proxy settings
-var setProxySettings = async function(proxyInfo) {
+var setProxySettings = async function (proxyInfo) {
   try {
     // Create proxy config for OnRequest
     var proxyConfig = {
       mode: proxyInfo.public_ip + ":" + proxyInfo.port,
-      data: [{
-        type: proxyInfo.type || "http",
-        hostname: proxyInfo.public_ip,
-        port: proxyInfo.port,
-        username: proxyInfo.username,
-        password: proxyInfo.password,
-        proxyDNS: true,
-        active: true
-      }]
+      data: [
+        {
+          type: proxyInfo.type || "http",
+          hostname: proxyInfo.public_ip,
+          port: proxyInfo.port,
+          username: proxyInfo.username,
+          password: proxyInfo.password,
+          proxyDNS: true,
+          active: true,
+        },
+      ],
     };
 
     // Set proxy using OnRequest
     await OnRequest.init(proxyConfig);
-    
+
     // Set authentication
     Authentication.init(proxyConfig.data);
-    
+
     // ALSO set browser proxy settings for immediate effect
     await setBrowserProxy(proxyInfo);
-    
+
     // Update badge and storage
     setBadgeOn(proxyInfo.location);
     await browser.storage.sync.set({ tx_proxy: proxyInfo });
-    
+
     console.log("Proxy set successfully:", proxyConfig.mode);
   } catch (error) {
     console.error("Error setting proxy:", error);
     sendMessageForPopup("failureGetProxyInfo", {
-      error: "Không thể thiết lập proxy"
+      error: "Không thể thiết lập proxy",
     });
   }
 };
 
 // Set browser proxy settings (moved from popup.js)
-var setBrowserProxy = async function(proxyInfo) {
+var setBrowserProxy = async function (proxyInfo) {
   try {
     var pref = {
       mode: proxyInfo.public_ip + ":" + proxyInfo.port,
-      data: [{
-        hostname: proxyInfo.public_ip,
-        username: proxyInfo.username,
-        password: proxyInfo.password,
-        port: proxyInfo.port,
-        type: proxyInfo.type || "http",
-        proxyDNS: true,
-        active: true
-      }]
+      data: [
+        {
+          hostname: proxyInfo.public_ip,
+          username: proxyInfo.username,
+          password: proxyInfo.password,
+          port: proxyInfo.port,
+          type: proxyInfo.type || "http",
+          proxyDNS: true,
+          active: true,
+        },
+      ],
     };
 
     // Check if Firefox
@@ -693,7 +714,7 @@ var setBrowserProxy = async function(proxyInfo) {
     } else {
       await setChromeProxy(pref);
     }
-    
+
     console.log("Browser proxy set:", pref.mode);
   } catch (error) {
     console.error("Error setting browser proxy:", error);
@@ -701,7 +722,7 @@ var setBrowserProxy = async function(proxyInfo) {
 };
 
 // Firefox proxy setting (moved from popup.js)
-var setFireFoxProxy = async function(pref) {
+var setFireFoxProxy = async function (pref) {
   try {
     if (navigator.userAgent.includes("Android")) return;
 
@@ -733,8 +754,8 @@ var setFireFoxProxy = async function(pref) {
   }
 };
 
-// Chrome proxy setting (moved from popup.js)  
-var setChromeProxy = async function(pref) {
+// Chrome proxy setting (moved from popup.js)
+var setChromeProxy = async function (pref) {
   try {
     var config = { value: {}, scope: "regular" };
     var pxy = findProxyForChrome(pref);
@@ -749,18 +770,20 @@ var setChromeProxy = async function(pref) {
 };
 
 // Find proxy helper (moved from popup.js)
-var findProxyForChrome = function(pref, mode) {
+var findProxyForChrome = function (pref, mode) {
   mode = mode || pref.mode;
-  return pref.data.find(function(i) {
-    return i.active &&
+  return pref.data.find(function (i) {
+    return (
+      i.active &&
       i.type !== "pac" &&
       i.hostname &&
-      mode === (i.hostname + ":" + i.port);
+      mode === i.hostname + ":" + i.port
+    );
   });
 };
 
 // Get proxy rule helper (moved from popup.js)
-var getSingleProxyRule = function(pxy) {
+var getSingleProxyRule = function (pxy) {
   return {
     singleProxy: {
       scheme: pxy.type,
@@ -775,23 +798,23 @@ function containsDomain(text) {
   return domainRegex.test(text);
 }
 
-var getCurrentProxyApi = async function(apiKey) {
+var getCurrentProxyApi = async function (apiKey) {
   var url = SERVER + "/webservice/statusIP?key=" + apiKey;
   var result = await callRequest(url);
 
   if (result && result.code == 200) {
     return result.data;
   }
-  sendMessageForPopup(
-    "failureGetProxyInfo",
-    {
-      error: result && result.status == 500 ? "Kết Nối Thất Bại" : (result && result.message) || "Lỗi kết nối",
-    }
-  );
+  sendMessageForPopup("failureGetProxyInfo", {
+    error:
+      result && result.status == 500
+        ? "Kết Nối Thất Bại"
+        : (result && result.message) || "Lỗi kết nối",
+  });
   return result;
 };
 
-var getIptToDomain = async function(domain) {
+var getIptToDomain = async function (domain) {
   var headers = { Accept: "application/dns-json" };
   var url = "https://cloudflare-dns.com/dns-query?name=" + domain + "&type=A";
   var result = await callRequest(url, headers);
@@ -800,19 +823,19 @@ var getIptToDomain = async function(domain) {
     var obj = result.Answer[Math.floor(Math.random() * result.Answer.length)];
     return obj.data;
   }
-  
+
   return null;
 };
 
 // Initialize extension
-browser.runtime.onStartup.addListener(function() {
+browser.runtime.onStartup.addListener(function () {
   console.log("VNProxy Extension started");
-  OnRequest.loadSettings().then(function() {
+  OnRequest.loadSettings().then(function () {
     OnRequest.initializeListener();
   });
 });
 
-browser.runtime.onInstalled.addListener(function() {
+browser.runtime.onInstalled.addListener(function () {
   console.log("VNProxy Extension installed/enabled");
 });
 

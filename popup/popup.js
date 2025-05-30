@@ -1,4 +1,4 @@
-if (typeof browser === 'undefined') {
+if (typeof browser === "undefined") {
   var browser = chrome;
 }
 
@@ -108,7 +108,7 @@ browser.runtime.onMessage.addListener((request) => {
       updateProxyUIStatus();
       countDowntime = request.data.nextChangeIP;
       const isAutoChangeIP = localStorage.getItem("isAutoChangeIP");
-      const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIP");
+      const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIPDefault");
       localStorage.setItem("proxyInfo", JSON.stringify(request.data));
       if (JSON.parse(isAutoChangeIP) && timeAutoChangeIP) {
         totalTimeChangeIp = Number(timeAutoChangeIP);
@@ -116,6 +116,10 @@ browser.runtime.onMessage.addListener((request) => {
       break;
     case "successGetInfoKey":
       getInfoKey(request.data);
+      break;
+
+    case "disconnectProxy":
+      directProxy();
       break;
     default:
       break;
@@ -144,6 +148,7 @@ const handleClick = () => {
   const timeAutoChangeIP = document.getElementById("time-change-ip").value;
 
   if (isAutoChangeIP) {
+    localStorage.setItem("timeAutoChangeIPDefault", timeAutoChangeIP);
     localStorage.setItem("isAutoChangeIP", isAutoChangeIP);
     localStorage.setItem("timeAutoChangeIP", timeAutoChangeIP);
   } else {
@@ -221,6 +226,22 @@ const updateProxyUIStatus = () => {
 const direct = () => {
   localStorage.removeItem("proxyInfo");
   localStorage.removeItem("proxyConnected");
+};
+
+const directProxy = async () => {
+  const proxyInfoo = await getProxyFromCache();
+  const config = {
+    apiKey: proxyInfoo && proxyInfoo.apiKey ? proxyInfoo.apiKey : "",
+    isAutoChangeIP: false,
+    timeAutoChangeIP: document.getElementById("time-change-ip").value,
+  };
+  storeConfCache(config);
+  popupPageClear();
+  direct();
+  clearInterval(timeChangeIP);
+  sendMessageForBackground("cancelALL", config);
+  const time = localStorage.getItem("timeAutoChangeIPDefault");
+  document.getElementById("time-change-ip").innerText = `${time ? time : 0}`;
 };
 
 const start = async () => {
@@ -325,7 +346,7 @@ const showProxyInfo = (proxyInfo, start) => {
   document.getElementById("proxy-status").classList.add("text-success");
 
   countDowntime = proxyInfo.nextChangeIP;
-  const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIP");
+  const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIPDefault");
   const isAutoChangeIP = localStorage.getItem("isAutoChangeIP");
   totalTimeChangeIp = timeAutoChangeIP;
   countDownWorker();
