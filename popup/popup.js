@@ -52,10 +52,11 @@ const countDowntimeChangeIp = () => {
     }
 
     const isAutoChangeIP = localStorage.getItem("isAutoChangeIP");
+    const isAutoChangeIPDefault = localStorage.getItem("isAutoChangeIPDefault");
     if (isAutoChangeIP) {
       localStorage.setItem(
         "timeAutoChangeIP",
-        totalTimeChangeIp > 0 ? totalTimeChangeIp : 0
+        totalTimeChangeIp > 0 ? totalTimeChangeIp : isAutoChangeIPDefault
       );
     }
   }, 1000);
@@ -108,7 +109,7 @@ browser.runtime.onMessage.addListener((request) => {
       updateProxyUIStatus();
       countDowntime = request.data.nextChangeIP;
       const isAutoChangeIP = localStorage.getItem("isAutoChangeIP");
-      const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIPDefault");
+      const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIP");
       localStorage.setItem("proxyInfo", JSON.stringify(request.data));
       if (JSON.parse(isAutoChangeIP) && timeAutoChangeIP) {
         totalTimeChangeIp = Number(timeAutoChangeIP);
@@ -154,6 +155,7 @@ const handleClick = () => {
   } else {
     localStorage.removeItem("isAutoChangeIP");
     localStorage.removeItem("timeAutoChangeIP");
+    localStorage.removeItem("timeAutoChangeIPDefault", timeAutoChangeIP);
   }
 
   const apiKey = document.getElementById("api_key").value;
@@ -190,6 +192,7 @@ const handleStart = () => {
   const proxyType = localStorage.getItem("proxyType");
   const isAutoChangeIP = localStorage.getItem("isAutoChangeIP");
   const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIP");
+  const timeAutoChangeIPDefault = localStorage.getItem("timeAutoChangeIPDefault");
 
   if (apiKey && change_ip_type && proxyType) {
     document.getElementById("api_key").value = apiKey;
@@ -210,8 +213,8 @@ const handleStart = () => {
 
   if (JSON.parse(isAutoChangeIP) && timeAutoChangeIP) {
     document.getElementById("is-auto-change").checked = isAutoChangeIP;
-    document.getElementById("time-change-ip").value = Number(timeAutoChangeIP);
-    totalTimeChangeIp = Number(timeAutoChangeIP);
+    document.getElementById("time-change-ip").value = Number(timeAutoChangeIP ? timeAutoChangeIP : timeAutoChangeIPDefault);
+    totalTimeChangeIp = Number(timeAutoChangeIP ? timeAutoChangeIP : timeAutoChangeIPDefault);
   }
 };
 
@@ -240,8 +243,9 @@ const directProxy = async () => {
   direct();
   clearInterval(timeChangeIP);
   sendMessageForBackground("cancelALL", config);
-  const time = localStorage.getItem("timeAutoChangeIPDefault");
-  document.getElementById("time-change-ip").innerText = `${time ? time : 0}`;
+  const timeAutoChangeIPDefault = localStorage.getItem("timeAutoChangeIPDefault");
+  const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIP");
+  document.getElementById("time-change-ip").innerText = `${timeAutoChangeIP ? timeAutoChangeIP : timeAutoChangeIPDefault}`;
 };
 
 const start = async () => {
@@ -346,9 +350,10 @@ const showProxyInfo = (proxyInfo, start) => {
   document.getElementById("proxy-status").classList.add("text-success");
 
   countDowntime = proxyInfo.nextChangeIP;
-  const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIPDefault");
+  const timeAutoChangeIP = localStorage.getItem("timeAutoChangeIP");
+  const timeAutoChangeIPDefault = localStorage.getItem("timeAutoChangeIPDefault");
   const isAutoChangeIP = localStorage.getItem("isAutoChangeIP");
-  totalTimeChangeIp = timeAutoChangeIP;
+  totalTimeChangeIp = timeAutoChangeIP ? Number(timeAutoChangeIP) : Number(timeAutoChangeIPDefault);
   countDownWorker();
   if (JSON.parse(isAutoChangeIP) && timeAutoChangeIP) {
     countDowntimeChangeIp();
