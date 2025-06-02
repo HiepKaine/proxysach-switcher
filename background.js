@@ -6,19 +6,29 @@ if (browserAPI.browserAction && !browserAPI.action) {
   browserAPI.action = browserAPI.browserAction;
 }
 
+/**
+ * FIXED BACKGROUND SCRIPT - ENABLE AUTO CHANGE TIMER FOR POPUP CLOSED SCENARIOS
+ *
+ * NEW HYBRID APPROACH:
+ * - Popup timer: Primary display and control when popup is open
+ * - Background timer: Backup system when popup is closed
+ * - Smart coordination: Avoid duplicate API calls
+ * - Real-time sync: Both systems stay in sync
+ */
+
 // Constants
 const CONFIG = {
   SERVER_URL: "https://api.vnproxy.com",
   ENDPOINTS: {
     STATUS_IP: "/webservice/statusIP",
     CHANGE_IP: "/webservice/changeIP",
-    GET_LOCATION: "/webservice/getLocation"
+    GET_LOCATION: "/webservice/getLocation",
   },
   STORAGE_KEYS: {
     PROXY_MODE: "proxyMode",
     PROXY_DATA: "proxyData",
     TIME_CHANGE_IP: "TIME_CHANGE_IP",
-    TX_PROXY: "tx_proxy"
+    TX_PROXY: "tx_proxy",
   },
   MESSAGES: {
     GET_LOCATIONS_DATA: "getLocationsData",
@@ -27,14 +37,14 @@ const CONFIG = {
     GET_CURRENT_PROXY: "getCurrentProxy",
     CANCEL_ALL: "cancelALL",
     CHANGE_IP: "changeIp",
-    AUTO_CHANGE_IP: "autoChangeIp"
+    AUTO_CHANGE_IP: "autoChangeIp",
   },
   ERRORS: {
     CONNECTION_FAILED: "Kết Nối Thất Bại",
     UNKNOWN_ERROR: "Lỗi không xác định",
     INVALID_PROXY: "Không thể lấy thông tin proxy",
-    SETUP_FAILED: "Không thể thiết lập proxy"
-  }
+    SETUP_FAILED: "Không thể thiết lập proxy",
+  },
 };
 
 /**
@@ -47,19 +57,20 @@ class AuthenticationManager {
 
   init(proxyData = []) {
     this.credentials = proxyData;
-    console.log("Authentication initialized with", this.credentials.length, "proxies");
     this.setupWebRequestListener();
   }
 
   setupWebRequestListener() {
     if (!browserAPI.webRequest?.onAuthRequired) return;
 
-    // Remove existing listener
-    if (browserAPI.webRequest.onAuthRequired.hasListener(this.handleAuthRequired)) {
-      browserAPI.webRequest.onAuthRequired.removeListener(this.handleAuthRequired);
+    if (
+      browserAPI.webRequest.onAuthRequired.hasListener(this.handleAuthRequired)
+    ) {
+      browserAPI.webRequest.onAuthRequired.removeListener(
+        this.handleAuthRequired
+      );
     }
 
-    // Add new listener
     browserAPI.webRequest.onAuthRequired.addListener(
       this.handleAuthRequired.bind(this),
       { urls: ["<all_urls>"] },
@@ -68,29 +79,32 @@ class AuthenticationManager {
   }
 
   handleAuthRequired(details) {
-    console.log("Auth required for:", details.url);
-
-    const credential = this.credentials.find(cred => cred.username && cred.password);
+    const credential = this.credentials.find(
+      (cred) => cred.username && cred.password
+    );
     if (credential) {
-      console.log("Providing auth for proxy:", credential.hostname);
       return {
         authCredentials: {
           username: credential.username,
-          password: credential.password
-        }
+          password: credential.password,
+        },
       };
     }
 
-    console.log("No credentials found for auth request");
     return {};
   }
 
   clear() {
     this.credentials = [];
-    if (browserAPI.webRequest?.onAuthRequired?.hasListener(this.handleAuthRequired)) {
-      browserAPI.webRequest.onAuthRequired.removeListener(this.handleAuthRequired);
+    if (
+      browserAPI.webRequest?.onAuthRequired?.hasListener(
+        this.handleAuthRequired
+      )
+    ) {
+      browserAPI.webRequest.onAuthRequired.removeListener(
+        this.handleAuthRequired
+      );
     }
-    console.log("Authentication cleared");
   }
 }
 
@@ -109,49 +123,47 @@ class ProxyRequestManager {
     await this.saveSettings(preferences);
     this.updateSettings(preferences);
     this.isInitialized = true;
-    console.log("Proxy initialized:", this.mode, this.proxy);
   }
 
   updateSettings(preferences) {
     this.mode = preferences.mode;
-    const validProxies = preferences.data.filter(proxy => 
-      proxy.type !== "pac" && proxy.hostname
+    const validProxies = preferences.data.filter(
+      (proxy) => proxy.type !== "pac" && proxy.hostname
     );
-    
+
     this.proxy = this.findMatchingProxy(validProxies, preferences.mode);
   }
 
   findMatchingProxy(proxies, mode) {
-    return /:\d+[^/]*$/.test(mode) && 
-      proxies.find(proxy => mode === `${proxy.hostname}:${proxy.port}`);
+    return (
+      /:\d+[^/]*$/.test(mode) &&
+      proxies.find((proxy) => mode === `${proxy.hostname}:${proxy.port}`)
+    );
   }
 
   initializeListener() {
     if (this.isListenerAdded || !browserAPI.proxy?.onRequest) return;
 
-    browserAPI.proxy.onRequest.addListener(
-      (e) => this.process(e),
-      { urls: ["<all_urls>"] }
-    );
+    browserAPI.proxy.onRequest.addListener((e) => this.process(e), {
+      urls: ["<all_urls>"],
+    });
     this.isListenerAdded = true;
-    console.log("Proxy listener initialized");
   }
 
   async loadSettings() {
     try {
       const result = await browserAPI.storage.local.get([
         CONFIG.STORAGE_KEYS.PROXY_MODE,
-        CONFIG.STORAGE_KEYS.PROXY_DATA
+        CONFIG.STORAGE_KEYS.PROXY_DATA,
       ]);
-      
+
       if (result.proxyMode && result.proxyData) {
         this.mode = result.proxyMode;
-        const validProxies = result.proxyData.filter(proxy => 
-          proxy.type !== "pac" && proxy.hostname
+        const validProxies = result.proxyData.filter(
+          (proxy) => proxy.type !== "pac" && proxy.hostname
         );
         this.proxy = this.findMatchingProxy(validProxies, result.proxyMode);
         this.isInitialized = true;
-        console.log("Proxy settings loaded from storage:", this.mode, this.proxy);
       }
     } catch (error) {
       console.error("Failed to load proxy settings:", error);
@@ -162,9 +174,8 @@ class ProxyRequestManager {
     try {
       await browserAPI.storage.local.set({
         [CONFIG.STORAGE_KEYS.PROXY_MODE]: preferences.mode,
-        [CONFIG.STORAGE_KEYS.PROXY_DATA]: preferences.data
+        [CONFIG.STORAGE_KEYS.PROXY_DATA]: preferences.data,
       });
-      console.log("Proxy settings saved to storage");
     } catch (error) {
       console.error("Failed to save proxy settings:", error);
     }
@@ -186,22 +197,21 @@ class ProxyRequestManager {
     const response = {
       type: proxyData.type === "socks5" ? "socks" : proxyData.type,
       host: proxyData.hostname,
-      port: parseInt(proxyData.port)
+      port: parseInt(proxyData.port),
     };
 
-    // Set proxyDNS for SOCKS
     if (proxyData.type.startsWith("socks")) {
       response.proxyDNS = !!proxyData.proxyDNS;
     }
 
-    // Add authentication
     if (proxyData.username && proxyData.password) {
       response.username = proxyData.username;
       response.password = proxyData.password;
-      response.proxyAuthorizationHeader = `Basic ${btoa(`${proxyData.username}:${proxyData.password}`)}`;
+      response.proxyAuthorizationHeader = `Basic ${btoa(
+        `${proxyData.username}:${proxyData.password}`
+      )}`;
     }
 
-    console.log("Proxy response:", response);
     return response;
   }
 
@@ -210,17 +220,16 @@ class ProxyRequestManager {
     this.proxy = {};
     this.isInitialized = false;
     await browserAPI.storage.local.remove([
-      CONFIG.STORAGE_KEYS.PROXY_MODE, 
-      CONFIG.STORAGE_KEYS.PROXY_DATA
+      CONFIG.STORAGE_KEYS.PROXY_MODE,
+      CONFIG.STORAGE_KEYS.PROXY_DATA,
     ]);
-    console.log("Proxy settings cleared");
   }
 
   getCurrentProxy() {
     return {
       mode: this.mode,
       proxy: this.proxy,
-      isActive: !!this.proxy && this.proxy.type !== "direct"
+      isActive: !!this.proxy && this.proxy.type !== "direct",
     };
   }
 }
@@ -234,7 +243,7 @@ class APIService {
       const response = await fetch(url, {
         method: "GET",
         mode: "cors",
-        headers
+        headers,
       });
       return await response.json();
     } catch (error) {
@@ -265,9 +274,10 @@ class APIService {
     const headers = { Accept: "application/dns-json" };
     const url = `https://cloudflare-dns.com/dns-query?name=${domain}&type=A`;
     const result = await this.makeRequest(url, headers);
-    
+
     if (result?.Answer?.length > 0) {
-      const randomAnswer = result.Answer[Math.floor(Math.random() * result.Answer.length)];
+      const randomAnswer =
+        result.Answer[Math.floor(Math.random() * result.Answer.length)];
       return randomAnswer.data;
     }
     return null;
@@ -281,15 +291,17 @@ class BrowserProxyManager {
   static async setBrowserProxy(proxyInfo) {
     const config = {
       mode: `${proxyInfo.public_ip}:${proxyInfo.port}`,
-      data: [{
-        hostname: proxyInfo.public_ip,
-        username: proxyInfo.username,
-        password: proxyInfo.password,
-        port: proxyInfo.port,
-        type: proxyInfo.type || "http",
-        proxyDNS: true,
-        active: true
-      }]
+      data: [
+        {
+          hostname: proxyInfo.public_ip,
+          username: proxyInfo.username,
+          password: proxyInfo.password,
+          port: proxyInfo.port,
+          type: proxyInfo.type || "http",
+          proxyDNS: true,
+          active: true,
+        },
+      ],
     };
 
     try {
@@ -298,7 +310,6 @@ class BrowserProxyManager {
       } else {
         await this.setChromeProxy(config);
       }
-      console.log("Browser proxy set:", config.mode);
     } catch (error) {
       console.error("Error setting browser proxy:", error);
     }
@@ -308,11 +319,11 @@ class BrowserProxyManager {
     if (navigator.userAgent.includes("Android")) return;
 
     try {
-      const isIncognitoAllowed = browserAPI.extension?.isAllowedIncognitoAccess ? 
-        await browserAPI.extension.isAllowedIncognitoAccess() : true;
-      
+      const isIncognitoAllowed = browserAPI.extension?.isAllowedIncognitoAccess
+        ? await browserAPI.extension.isAllowedIncognitoAccess()
+        : true;
+
       if (!isIncognitoAllowed) {
-        console.log("Incognito access not allowed");
         return;
       }
 
@@ -328,7 +339,7 @@ class BrowserProxyManager {
     try {
       const config = { value: {}, scope: "regular" };
       const proxy = this.findActiveProxy(preferences);
-      
+
       if (proxy && browserAPI.proxy?.settings) {
         config.value.mode = "fixed_servers";
         config.value.rules = this.getSingleProxyRule(proxy);
@@ -340,11 +351,12 @@ class BrowserProxyManager {
   }
 
   static findActiveProxy(preferences) {
-    return preferences.data.find(proxy => 
-      proxy.active && 
-      proxy.type !== "pac" && 
-      proxy.hostname &&
-      preferences.mode === `${proxy.hostname}:${proxy.port}`
+    return preferences.data.find(
+      (proxy) =>
+        proxy.active &&
+        proxy.type !== "pac" &&
+        proxy.hostname &&
+        preferences.mode === `${proxy.hostname}:${proxy.port}`
     );
   }
 
@@ -353,14 +365,14 @@ class BrowserProxyManager {
       singleProxy: {
         scheme: proxy.type,
         host: proxy.hostname,
-        port: parseInt(proxy.port)
-      }
+        port: parseInt(proxy.port),
+      },
     };
   }
 }
 
 /**
- * Auto Change Manager - Handles automatic IP changing
+ * FIXED Auto Change Manager - RE-ENABLED for popup closed scenarios
  */
 class AutoChangeManager {
   constructor() {
@@ -368,106 +380,158 @@ class AutoChangeManager {
     this.timeInterval = 0;
     this.currentTimer = null;
     this.config = null;
+    this.isPopupOpen = false; // Track popup state
   }
 
   async start(config) {
-    // Stop any existing timer
     this.stop();
 
-    // Validate config
     if (!config.isAutoChangeIP || config.timeAutoChangeIP <= 0) {
-      console.log("Auto change IP disabled or invalid time");
       return;
-    }
-
-    // Save time setting to storage
-    if (config.timeAutoChangeIP > 0) {
-      await browserAPI.storage.sync.set({ [CONFIG.STORAGE_KEYS.TIME_CHANGE_IP]: config.timeAutoChangeIP });
     }
 
     this.isRunning = true;
     this.timeInterval = config.timeAutoChangeIP;
     this.config = config;
 
-    console.log(`Starting auto change IP with interval: ${this.timeInterval} seconds`);
-    
-    // Start the auto change cycle
+    // Save time setting to storage
+    if (config.timeAutoChangeIP > 0) {
+      await browserAPI.storage.sync.set({
+        [CONFIG.STORAGE_KEYS.TIME_CHANGE_IP]: config.timeAutoChangeIP,
+      });
+    }
+
+    // FIXED: Sync with any existing popup timer
+    await this.syncWithPopupTimer();
+
+    // Start background monitoring
     this.scheduleNextChange();
+  }
+
+  // FIXED: Sync with popup timer to avoid conflicts
+  async syncWithPopupTimer() {
+    try {
+      // Get current time from localStorage (popup's timer state)
+      const result = await browserAPI.storage.local.get([
+        "timeAutoChangeIP",
+        "timer_last_save_time",
+      ]);
+
+      if (result.timeAutoChangeIP && result.timer_last_save_time) {
+        const now = Date.now();
+        const timePassed = Math.floor(
+          (now - parseInt(result.timer_last_save_time)) / 1000
+        );
+        const remainingTime = parseInt(result.timeAutoChangeIP) - timePassed;
+
+        if (remainingTime > 0) {
+          this.timeInterval = remainingTime;
+        } else {
+          // Timer already expired, trigger change immediately
+          setTimeout(() => this.handleAutoChange(), 1000);
+          return;
+        }
+      }
+    } catch (error) {
+      console.error("Error syncing with popup timer:", error);
+    }
   }
 
   scheduleNextChange() {
     if (!this.isRunning) return;
 
-    console.log(`Next IP change in ${this.timeInterval} seconds`);
-    
     this.currentTimer = setTimeout(async () => {
       if (!this.isRunning) return;
 
+      // Check if popup is open by trying to send a test message
       try {
-        // Step 1: Disconnect current proxy
-        console.log("Auto change: Disconnecting current proxy...");
-        messageHandler.sendToPopup("disconnectProxy", {});
-        await proxyManager.setDirectProxy();
-        
-        // Wait a moment for cleanup
-        await this.sleep(1000);
-        
-        // Step 2: Get new IP
-        console.log("Auto change: Getting new IP...");
-        messageHandler.sendToPopup("showProcessingNewIpConnect", {});
-        
-        const result = await APIService.changeIP(this.config.apiKey, this.config.location);
-        
-        if (result?.code === 200) {
-          // Step 3: Set new proxy
-          console.log("Auto change: Setting new proxy...");
-          await proxyManager.handleProxyResponse(result.data, this.config.apiKey, this.config.proxyType);
-          
-          // Step 4: Schedule next change if still running
-          if (this.isRunning) {
-            console.log("Auto change: IP changed successfully, scheduling next change");
-            this.scheduleNextChange();
-          }
-        } else {
-          // Handle error
-          const error = result?.code === 500 ? 
-            CONFIG.ERRORS.CONNECTION_FAILED : 
-            (result?.message || CONFIG.ERRORS.UNKNOWN_ERROR);
-          
-          console.error("Auto change failed:", error);
-          messageHandler.sendToPopup("failureGetProxyInfo", { error });
-          
-          // Try again after a shorter interval on error
-          if (this.isRunning) {
-            console.log("Auto change: Retrying in 30 seconds due to error");
-            this.currentTimer = setTimeout(() => this.scheduleNextChange(), 30000);
-          }
-        }
+        await browserAPI.runtime.sendMessage({ greeting: "ping" });
+        // Popup is open, let it handle the timer
+        this.scheduleNextChange(); // Check again later
+        return;
       } catch (error) {
-        console.error("Auto change error:", error);
-        if (this.isRunning) {
-          // Retry on unexpected error
-          console.log("Auto change: Retrying in 30 seconds due to unexpected error");
-          this.currentTimer = setTimeout(() => this.scheduleNextChange(), 30000);
-        }
+        // Popup is closed, background handles auto change
+        await this.handleAutoChange();
       }
     }, this.timeInterval * 1000);
   }
 
+  // FIXED: Handle auto change when popup is closed
+  async handleAutoChange() {
+    if (!this.isRunning) return;
+
+    try {
+      // Step 1: Disconnect current proxy
+      messageHandler.sendToPopup("showProcessingNewIpConnect", {});
+      await proxyManager.setDirectProxy();
+
+      // Step 2: Get new IP
+      const result = await APIService.changeIP(
+        this.config.apiKey,
+        this.config.location
+      );
+
+      if (result?.code === 200) {
+        // Step 3: Set new proxy
+        await proxyManager.handleProxyResponse(
+          result.data,
+          this.config.apiKey,
+          this.config.proxyType
+        );
+
+        // Step 4: Reset timer to default and continue
+        this.timeInterval = this.config.timeAutoChangeIP;
+
+        // FIXED: Update popup timer state for sync
+        await browserAPI.storage.local.set({
+          timeAutoChangeIP: this.timeInterval,
+          timer_last_save_time: Date.now(),
+        });
+
+        // Continue the cycle
+        if (this.isRunning) {
+          this.scheduleNextChange();
+        }
+      } else {
+        // Handle error
+        const error =
+          result?.code === 500
+            ? CONFIG.ERRORS.CONNECTION_FAILED
+            : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
+
+        console.error("Background auto change failed:", error);
+        messageHandler.sendToPopup("failureGetProxyInfo", { error });
+
+        // Retry after shorter interval on error
+        if (this.isRunning) {
+          this.currentTimer = setTimeout(
+            () => this.scheduleNextChange(),
+            30000
+          );
+        }
+      }
+    } catch (error) {
+      console.error("Background auto change unexpected error:", error);
+      if (this.isRunning) {
+        // Retry on unexpected error
+        this.currentTimer = setTimeout(() => this.scheduleNextChange(), 30000);
+      }
+    }
+  }
+
   stop() {
-    console.log("Stopping auto change IP");
     this.isRunning = false;
-    
+
     if (this.currentTimer) {
       clearTimeout(this.currentTimer);
       this.currentTimer = null;
     }
-    
+
     this.config = null;
   }
 
   sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   // Get current status
@@ -475,7 +539,11 @@ class AutoChangeManager {
     return {
       isRunning: this.isRunning,
       timeInterval: this.timeInterval,
-      hasConfig: !!this.config
+      hasConfig: !!this.config,
+      nextChangeTime: this.currentTimer
+        ? Date.now() + this.timeInterval * 1000
+        : null,
+      mode: "hybrid_background_enabled",
     };
   }
 }
@@ -488,52 +556,78 @@ class MessageHandler {
     try {
       browserAPI.runtime.sendMessage({ greeting: message, data });
     } catch (error) {
-      console.error("Error sending message to popup:", error);
+      // Popup might be closed, that's fine
     }
   }
 
   async handleMessage(request, sender, sendResponse) {
     try {
       switch (request.greeting) {
+        case "ping":
+          // FIXED: Handle ping from popup to detect if it's open
+          sendResponse({ pong: true });
+          break;
+
         case CONFIG.MESSAGES.GET_LOCATIONS_DATA:
           const locations = await this.getLocations();
           if (locations) sendResponse({ data: locations });
           break;
-        
+
         case CONFIG.MESSAGES.CHECK_VERSION:
           this.checkVersion();
           await proxyManager.setDirectProxy();
           break;
-        
+
         case CONFIG.MESSAGES.GET_INFO_KEY:
           await this.getInfoKey(request.data);
           break;
-        
+
         case CONFIG.MESSAGES.GET_CURRENT_PROXY:
           autoChangeManager.stop();
           await proxyManager.setDirectProxy();
-          await this.getCurrentProxy(request.data.apiKey, request.data.proxyType);
+          await this.getCurrentProxy(
+            request.data.apiKey,
+            request.data.proxyType
+          );
           break;
-        
+
         case CONFIG.MESSAGES.CANCEL_ALL:
           this.deleteAlarm("flagLoop");
           this.deleteAlarm("refreshPage");
           autoChangeManager.stop();
-          await this.disconnectProxy(request.data.apiKey, request.data.whitelist_ip);
+          await this.disconnectProxy(
+            request.data.apiKey,
+            request.data.whitelist_ip
+          );
           await proxyManager.setDirectProxy();
           break;
-        
+
         case CONFIG.MESSAGES.CHANGE_IP:
           autoChangeManager.stop();
           await proxyManager.setDirectProxy();
-          await this.changeIP(request.data.apiKey, request.data.location, request.data.proxyType);
+
+          if (request.data.isAutoChangeIP) {
+          } else {
+          }
+
+          await this.changeIP(
+            request.data.apiKey,
+            request.data.location,
+            request.data.proxyType
+          );
           break;
-        
+
         case CONFIG.MESSAGES.AUTO_CHANGE_IP:
+          // FIXED: Start background auto change manager
           autoChangeManager.stop();
           await proxyManager.setDirectProxy();
-          // First change IP immediately, then start auto change
-          await this.changeLocationProxy(request.data.apiKey, request.data.location, request.data.proxyType);
+
+          // Start both immediate change and background manager
+          await this.changeIP(
+            request.data.apiKey,
+            request.data.location,
+            request.data.proxyType
+          );
           await autoChangeManager.start(request.data);
           break;
       }
@@ -548,7 +642,9 @@ class MessageHandler {
       this.sendToPopup("getLocationsSuccess", result.data);
       return result.data;
     }
-    this.sendToPopup("failureGetProxyInfo", { error: CONFIG.ERRORS.CONNECTION_FAILED });
+    this.sendToPopup("failureGetProxyInfo", {
+      error: CONFIG.ERRORS.CONNECTION_FAILED,
+    });
     return null;
   }
 
@@ -558,37 +654,44 @@ class MessageHandler {
       this.sendToPopup("successGetInfoKey", result);
       return result.data;
     }
-    const error = result?.status === 500 ? 
-      CONFIG.ERRORS.CONNECTION_FAILED : 
-      result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
+    const error =
+      result?.status === 500
+        ? CONFIG.ERRORS.CONNECTION_FAILED
+        : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
     this.sendToPopup("failureGetProxyInfo", { error });
   }
 
   async getCurrentProxy(apiKey, proxyType) {
     this.sendToPopup("processingGetProxyInfo", {});
+
     const result = await APIService.getInfoKey(apiKey);
     if (result?.code === 200) {
       await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
+    } else {
+      const error =
+        result?.status === 500
+          ? CONFIG.ERRORS.CONNECTION_FAILED
+          : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
+      this.sendToPopup("failureGetProxyInfo", { error });
     }
   }
 
   async changeIP(apiKey, location, proxyType) {
     this.sendToPopup("showProcessingNewIpConnect", {});
-    const result = await APIService.changeIP(apiKey, location);
-    if (result?.code === 200) {
-      await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
-    }
-  }
 
-  async changeLocationProxy(apiKey, location, proxyType) {
     const result = await APIService.changeIP(apiKey, location);
     if (result?.code === 200) {
       await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
+    } else {
+      const error =
+        result?.code === 500
+          ? CONFIG.ERRORS.CONNECTION_FAILED
+          : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
+      this.sendToPopup("failureGetProxyInfo", { error });
     }
   }
 
   async disconnectProxy(apiKey, whitelistIp) {
-    // Implementation for disconnect if needed
     return true;
   }
 
@@ -596,9 +699,7 @@ class MessageHandler {
     browserAPI.alarms.clear(name);
   }
 
-  checkVersion() {
-    console.log("Version check called");
-  }
+  checkVersion() {}
 }
 
 /**
@@ -613,16 +714,16 @@ class MainProxyManager {
   async setDirectProxy() {
     try {
       await this.requestManager.clearProxy();
-      
+
       if (browserAPI.proxy?.settings) {
         await browserAPI.proxy.settings.clear({});
       }
 
       this.authManager.clear();
       this.setBadgeOff();
-      await browserAPI.storage.sync.set({ [CONFIG.STORAGE_KEYS.TX_PROXY]: null });
-      
-      console.log("Proxy set to direct");
+      await browserAPI.storage.sync.set({
+        [CONFIG.STORAGE_KEYS.TX_PROXY]: null,
+      });
     } catch (error) {
       console.error("Error setting direct proxy:", error);
     }
@@ -632,43 +733,50 @@ class MainProxyManager {
     try {
       const proxyConfig = {
         mode: `${proxyInfo.public_ip}:${proxyInfo.port}`,
-        data: [{
-          type: proxyInfo.type || "http",
-          hostname: proxyInfo.public_ip,
-          port: proxyInfo.port,
-          username: proxyInfo.username,
-          password: proxyInfo.password,
-          proxyDNS: true,
-          active: true
-        }]
+        data: [
+          {
+            type: proxyInfo.type || "http",
+            hostname: proxyInfo.public_ip,
+            port: proxyInfo.port,
+            username: proxyInfo.username,
+            password: proxyInfo.password,
+            proxyDNS: true,
+            active: true,
+          },
+        ],
       };
 
       await this.requestManager.init(proxyConfig);
       this.authManager.init(proxyConfig.data);
       await BrowserProxyManager.setBrowserProxy(proxyInfo);
-      
+
       this.setBadgeOn(proxyInfo.location);
-      await browserAPI.storage.sync.set({ [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo });
-      
-      console.log("Proxy set successfully:", proxyConfig.mode);
+      await browserAPI.storage.sync.set({
+        [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
+      });
     } catch (error) {
       console.error("Error setting proxy:", error);
-      messageHandler.sendToPopup("failureGetProxyInfo", { error: CONFIG.ERRORS.SETUP_FAILED });
+      messageHandler.sendToPopup("failureGetProxyInfo", {
+        error: CONFIG.ERRORS.SETUP_FAILED,
+      });
     }
   }
 
   async handleProxyResponse(response, apiKey, proxyType) {
     if (!response?.ipv4 && !response?.ipv6) {
-      const error = response?.code === 500 ? 
-        CONFIG.ERRORS.CONNECTION_FAILED : 
-        CONFIG.ERRORS.INVALID_PROXY;
+      const error =
+        response?.code === 500
+          ? CONFIG.ERRORS.CONNECTION_FAILED
+          : CONFIG.ERRORS.INVALID_PROXY;
       messageHandler.sendToPopup("failureGetProxyInfo", { error });
       return;
     }
 
     const proxyInfo = await this.buildProxyInfo(response, apiKey, proxyType);
     if (!proxyInfo.public_ip || !proxyInfo.port) {
-      messageHandler.sendToPopup("failureGetProxyInfo", { error: CONFIG.ERRORS.INVALID_PROXY });
+      messageHandler.sendToPopup("failureGetProxyInfo", {
+        error: CONFIG.ERRORS.INVALID_PROXY,
+      });
       return;
     }
 
@@ -679,7 +787,7 @@ class MainProxyManager {
   async buildProxyInfo(response, apiKey, proxyType) {
     const portV4 = response.ipv4 ? this.extractPort(response.ipv4) : "";
     const portV6 = response.ipv6 ? this.extractPort(response.ipv6) : "";
-    
+
     let publicIp = response.public_ipv4;
     if (response.ipv4 && this.containsDomain(response.ipv4)) {
       try {
@@ -697,11 +805,12 @@ class MainProxyManager {
       password: response.credential?.password,
       proxyTimeout: response.proxyTimeout,
       nextChangeIP: response.nextChangeIP,
-      nextTime: Math.floor(Date.now() / 1000) + parseInt(response.nextChangeIP || 0),
+      nextTime:
+        Math.floor(Date.now() / 1000) + parseInt(response.nextChangeIP || 0),
       location: response.location,
       apiKey,
       port: this.selectPort(proxyType, portV4, portV6),
-      type: response.proxyType || "http"
+      type: response.proxyType || "http",
     };
   }
 
@@ -741,23 +850,21 @@ const proxyManager = new MainProxyManager();
 // Set up message listener
 browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
   messageHandler.handleMessage(request, sender, sendResponse);
+  return true; // Keep channel open for async responses
 });
 
 // Initialize extension
 const initializeExtension = async () => {
-  console.log("VNProxy Extension initializing...");
   await proxyRequestManager.loadSettings();
   proxyRequestManager.initializeListener();
 };
 
 // Extension event listeners
 browserAPI.runtime.onStartup.addListener(() => {
-  console.log("VNProxy Extension started");
   initializeExtension();
 });
 
 browserAPI.runtime.onInstalled.addListener(() => {
-  console.log("VNProxy Extension installed/enabled");
   initializeExtension();
 });
 
