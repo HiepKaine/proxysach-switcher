@@ -128,9 +128,309 @@ class ChromeStorageManager {
   }
 }
 
+
 /**
- * Message Handler - Handles communication with background script
+ * FIXED Timer Manager - Correct reset logic after successful IP change
  */
+class TimerManager {
+  constructor() {
+    this.nextTimeChange = null;
+    this.timeChangeIP = null;
+    this.countDowntime = 0;
+    this.totalTimeChangeIp = 0;
+    this.autoChangeInterval = 0;
+    this.isRestoringTimer = false;
+    this.lastUpdateTime = 0;
+  }
+
+  // Basic countdown timer for nextChangeIP display
+  startCountDown() {
+    this.clearCountDown();
+
+    if (!this.countDowntime) return;
+
+    this.nextTimeChange = setInterval(() => {
+      const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME);
+      if (!element) {
+        this.clearCountDown();
+        return;
+      }
+
+      element.innerText = `${this.countDowntime} s`;
+      this.countDowntime--;
+
+      if (this.countDowntime < 0) {
+        element.innerText = "0 s";
+        this.clearCountDown();
+        return;
+      }
+
+      // Update localStorage
+      const proxyInfo = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO, true) || {};
+      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO, {
+        ...proxyInfo,
+        nextChangeIP: this.countDowntime > 0 ? this.countDowntime : 0,
+      });
+    }, 1000);
+  }
+
+  // FIXED: Auto change timer with background sync
+  startTimeChangeCountdown() {
+    this.clearTimeChangeCountdown();
+
+    if (!this.totalTimeChangeIp) return;
+
+    console.log(`Popup timer started: ${this.totalTimeChangeIp}s`);
+
+    this.timeChangeIP = setInterval(async () => {
+      const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
+      if (!element) {
+        this.clearTimeChangeCountdown();
+        return;
+      }
+
+      element.value = `${this.totalTimeChangeIp}`;
+      this.totalTimeChangeIp--;
+      this.lastUpdateTime = Date.now();
+
+      // Update popup activity in storage for background sync
+      this.updatePopupActivity();
+
+      // When timer reaches 0, notify background immediately
+      if (this.totalTimeChangeIp < 0) {
+        console.log("Popup timer expired, notifying background immediately");
+        this.clearTimeChangeCountdown();
+        
+        // Mark popup as inactive
+        this.markPopupInactive();
+        
+        // FIXED: Immediately notify background that timer expired
+        this.notifyBackgroundTimerExpired();
+        
+        return;
+      }
+
+      // Update localStorage
+      const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+      if (isAutoChangeIP) {
+        StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, this.totalTimeChangeIp);
+      }
+    }, 1000);
+  }
+
+  // FIXED: Separate method for notifying background
+  async notifyBackgroundTimerExpired() {
+    try {
+      const response = await browserAPI.runtime.sendMessage({
+        greeting: "popupTimerExpired",
+        data: { timestamp: Date.now() }
+      });
+      console.log("Background notified of timer expiration:", response);
+    } catch (error) {
+      console.error("Error notifying background:", error);
+      // Fallback: set storage flag for background to check
+      try {
+        await browserAPI.storage.local.set({
+          timerExpiredFlag: true,
+          timerExpiredTime: Date.now()
+        });
+      } catch (storageError) {
+        console.error("Error setting timer expired flag:", storageError);
+      }
+    }
+  }
+
+  // Update popup activity for background sync
+  updatePopupActivity() {
+    try {
+      browserAPI.storage.local.set({
+        popupTimerActive: true,
+        popupLastUpdate: Date.now(),
+        popupTimerValue: this.totalTimeChangeIp
+      });
+    } catch (error) {
+      console.error("Error updating popup activity:", error);
+    }
+  }
+
+  // Mark popup as inactive
+  markPopupInactive() {
+    try {
+      browserAPI.storage.local.set({
+        popupTimerActive: false,
+        popupLastUpdate: Date.now()
+      });
+    } catch (error) {
+      console.error("Error marking popup inactive:", error);
+    }
+  }
+
+  // FIXED: Sync with background timer when popup opens
+  async syncWithBackground() {
+    try {
+      // Request remaining time from background
+      const response = await browserAPI.runtime.sendMessage({
+        greeting: "getBackgroundTimerStatus",
+        data: {}
+      });
+
+      if (response && response.remainingTime > 0) {
+        console.log(`Syncing with background: ${response.remainingTime}s remaining`);
+        
+        this.totalTimeChangeIp = response.remainingTime;
+        
+        const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
+        if (element) {
+          element.value = `${response.remainingTime}`;
+        }
+
+        // Update storage
+        StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, response.remainingTime);
+        
+        // Start countdown with synced time
+        this.isRestoringTimer = true;
+        this.startTimeChangeCountdown();
+        
+        return true;
+      }
+    } catch (error) {
+      console.error("Error syncing with background:", error);
+    }
+    
+    return false;
+  }
+
+  // FIXED: Restore timer with background sync
+  async restoreTimerFromStorage() {
+    const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+    if (!JSON.parse(isAutoChangeIP)) {
+      return false;
+    }
+
+    // First try to sync with background
+    const synced = await this.syncWithBackground();
+    if (synced) {
+      return true;
+    }
+
+    // Fallback to localStorage if background sync fails
+    const savedTime = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
+    const defaultTime = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT);
+
+    if (savedTime && parseInt(savedTime) > 0) {
+      this.clearTimeChangeCountdown();
+      this.totalTimeChangeIp = parseInt(savedTime);
+      this.isRestoringTimer = true;
+      this.startTimeChangeCountdown();
+      return true;
+    } else if (defaultTime) {
+      const freshTime = parseInt(defaultTime);
+      this.clearTimeChangeCountdown();
+      this.totalTimeChangeIp = freshTime;
+      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, freshTime);
+      this.isRestoringTimer = false;
+      this.startTimeChangeCountdown();
+      return true;
+    }
+
+    return false;
+  }
+
+  // Reset auto change timer to default value (called externally)
+  resetAutoChangeTimer() {
+    const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+    const defaultTime = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT);
+
+    if (JSON.parse(isAutoChangeIP) && defaultTime) {
+      const timeValue = parseInt(defaultTime);
+
+      this.clearTimeChangeCountdown();
+      this.totalTimeChangeIp = timeValue;
+
+      const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
+      if (element) {
+        element.value = `${timeValue}`;
+      }
+
+      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, timeValue);
+      
+      // Update popup activity
+      this.updatePopupActivity();
+    }
+  }
+
+  // Clear functions
+  clearCountDown() {
+    if (this.nextTimeChange) {
+      clearInterval(this.nextTimeChange);
+      this.nextTimeChange = null;
+    }
+  }
+
+  clearTimeChangeCountdown() {
+    if (this.timeChangeIP) {
+      clearInterval(this.timeChangeIP);
+      this.timeChangeIP = null;
+    }
+    
+    // Mark popup as inactive when clearing timer
+    this.markPopupInactive();
+  }
+
+  clearAll() {
+    this.clearCountDown();
+    this.clearTimeChangeCountdown();
+    this.countDowntime = 0;
+    this.totalTimeChangeIp = 0;
+    this.autoChangeInterval = 0;
+    this.isRestoringTimer = false;
+    this.markPopupInactive();
+  }
+
+  // Setters
+  setCountDowntime(time) {
+    this.countDowntime = parseInt(time) || 0;
+  }
+
+  setTotalTimeChangeIp(time) {
+    this.totalTimeChangeIp = parseInt(time) || 0;
+  }
+
+  // Get status
+  getStatus() {
+    return {
+      countDowntime: this.countDowntime,
+      totalTimeChangeIp: this.totalTimeChangeIp,
+      autoChangeInterval: this.autoChangeInterval,
+      isCountDownRunning: !!this.nextTimeChange,
+      isTimeChangeRunning: !!this.timeChangeIP,
+      isRestoringTimer: this.isRestoringTimer,
+      lastUpdateTime: this.lastUpdateTime,
+    };
+  }
+
+  // Force stop all timers
+  forceStopAll() {
+    if (this.nextTimeChange) {
+      clearInterval(this.nextTimeChange);
+      this.nextTimeChange = null;
+    }
+
+    if (this.timeChangeIP) {
+      clearInterval(this.timeChangeIP);
+      this.timeChangeIP = null;
+    }
+
+    this.countDowntime = 0;
+    this.totalTimeChangeIp = 0;
+    this.autoChangeInterval = 0;
+    this.isRestoringTimer = false;
+    this.lastUpdateTime = 0;
+    this.markPopupInactive();
+  }
+}
+
+// FIXED: Add handler for background timer status requests
 class MessageHandler {
   static async sendToBackground(message, data = {}) {
     try {
@@ -169,308 +469,6 @@ class MessageHandler {
     });
   }
 }
-
-/**
- * FIXED Timer Manager - Correct reset logic after successful IP change
- */
-class TimerManager {
-  constructor() {
-    this.nextTimeChange = null;
-    this.timeChangeIP = null;
-    this.countDowntime = 0;
-    this.totalTimeChangeIp = 0;
-    this.autoChangeInterval = 0;
-    // FIXED: Add flag to track timer context
-    this.isRestoringTimer = false;
-  }
-
-  // Basic countdown timer for nextChangeIP display
-  startCountDown() {
-    this.clearCountDown();
-
-    if (!this.countDowntime) return;
-
-    this.nextTimeChange = setInterval(() => {
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
-      );
-      if (!element) {
-        this.clearCountDown();
-        return;
-      }
-
-      element.innerText = `${this.countDowntime} s`;
-      this.countDowntime--;
-
-      if (this.countDowntime < 0) {
-        element.innerText = "0 s";
-        this.clearCountDown();
-        return;
-      }
-
-      // Update localStorage
-      const proxyInfo =
-        StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO, true) || {};
-      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO, {
-        ...proxyInfo,
-        nextChangeIP: this.countDowntime > 0 ? this.countDowntime : 0,
-      });
-    }, 1000);
-  }
-
-  // FIXED: Auto change timer with proper reset logic
-  startTimeChangeCountdown() {
-    this.clearTimeChangeCountdown();
-
-    if (!this.totalTimeChangeIp) return;
-
-    this.timeChangeIP = setInterval(() => {
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-      );
-      if (!element) {
-        this.clearTimeChangeCountdown();
-        return;
-      }
-
-      element.value = `${this.totalTimeChangeIp}`;
-      this.totalTimeChangeIp--;
-
-      // FIXED: When timer reaches 0, trigger auto change
-      if (this.totalTimeChangeIp < 0) {
-        // Clear the timer
-        this.clearTimeChangeCountdown();
-
-        // Check if auto change is still enabled
-        const isAutoChangeIP = StorageManager.get(
-          POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-        );
-        if (JSON.parse(isAutoChangeIP)) {
-          // Trigger auto change IP
-          this.triggerAutoChangeIP();
-        } else {
-          // Reset to default if auto change is disabled
-          this.resetToDefaultTime();
-        }
-        return;
-      }
-
-      // Update localStorage
-      const isAutoChangeIP = StorageManager.get(
-        POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-      );
-      if (isAutoChangeIP) {
-        StorageManager.set(
-          POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-          this.totalTimeChangeIp
-        );
-      }
-    }, 1000);
-  }
-
-  // FIXED: Trigger auto change IP when timer expires
-  async triggerAutoChangeIP() {
-    try {
-      const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
-      const proxyType =
-        StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_TYPE) || "ipv4";
-      const locationElement = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
-      );
-      const location = locationElement ? locationElement.value : null;
-
-      if (!apiKey) {
-        console.error("No API key for auto change");
-        this.resetToDefaultTime();
-        return;
-      }
-
-      // Show processing state
-      const statusElement = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-      );
-      if (statusElement) {
-        statusElement.innerText = "• Tự động đổi IP...";
-        statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-        statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
-      }
-
-      // Send change IP request to background
-      const config = {
-        apiKey: apiKey,
-        proxyType: proxyType,
-        location: location,
-        isAutoChangeIP: true,
-      };
-
-      await MessageHandler.sendToBackground(
-        POPUP_CONFIG.BACKGROUND_MESSAGES.CHANGE_IP,
-        config
-      );
-
-      // Timer will be reset to default when handleSuccessfulConnection is called
-    } catch (error) {
-      console.error("Error in auto change IP:", error);
-      this.resetToDefaultTime();
-    }
-  }
-
-  // FIXED: Reset to default time (used when timer expires or on error)
-  resetToDefaultTime() {
-    const defaultTime = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-    );
-    const resetTime = parseInt(defaultTime) || 60;
-
-    this.totalTimeChangeIp = resetTime;
-    StorageManager.set(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-      resetTime
-    );
-
-    const element = document.getElementById(
-      POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-    );
-    if (element) {
-      element.value = `${resetTime}`;
-    }
-
-    // Restart countdown with default time
-    this.isRestoringTimer = false; // Not a restore, it's a fresh start
-    this.startTimeChangeCountdown();
-  }
-
-  // FIXED: Method to restore timer from storage (for popup reopen)
-  restoreTimerFromStorage() {
-    const isAutoChangeIP = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-    );
-    if (!JSON.parse(isAutoChangeIP)) {
-      return false;
-    }
-
-    const savedTime = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP
-    );
-    const defaultTime = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-    );
-
-    if (savedTime && parseInt(savedTime) > 0) {
-      this.clearTimeChangeCountdown();
-      this.totalTimeChangeIp = parseInt(savedTime);
-      this.isRestoringTimer = true; // Flag as restore operation
-      this.startTimeChangeCountdown();
-      return true;
-    } else if (defaultTime) {
-      const freshTime = parseInt(defaultTime);
-      this.clearTimeChangeCountdown();
-      this.totalTimeChangeIp = freshTime;
-      StorageManager.set(
-        POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-        freshTime
-      );
-      this.isRestoringTimer = false; // Fresh start, not restore
-      this.startTimeChangeCountdown();
-      return true;
-    }
-
-    return false;
-  }
-
-  // Reset auto change timer to default value (called externally)
-  resetAutoChangeTimer() {
-    const isAutoChangeIP = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-    );
-    const defaultTime = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-    );
-
-    if (JSON.parse(isAutoChangeIP) && defaultTime) {
-      const timeValue = parseInt(defaultTime);
-
-      this.clearTimeChangeCountdown();
-      this.totalTimeChangeIp = timeValue;
-
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-      );
-      if (element) {
-        element.value = `${timeValue}`;
-      }
-
-      StorageManager.set(
-        POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-        timeValue
-      );
-    }
-  }
-
-  // Clear functions
-  clearCountDown() {
-    if (this.nextTimeChange) {
-      clearInterval(this.nextTimeChange);
-      this.nextTimeChange = null;
-    }
-  }
-
-  clearTimeChangeCountdown() {
-    if (this.timeChangeIP) {
-      clearInterval(this.timeChangeIP);
-      this.timeChangeIP = null;
-    }
-  }
-
-  clearAll() {
-    this.clearCountDown();
-    this.clearTimeChangeCountdown();
-    this.countDowntime = 0;
-    this.totalTimeChangeIp = 0;
-    this.autoChangeInterval = 0;
-    this.isRestoringTimer = false;
-  }
-
-  // Setters
-  setCountDowntime(time) {
-    this.countDowntime = parseInt(time) || 0;
-  }
-
-  setTotalTimeChangeIp(time) {
-    this.totalTimeChangeIp = parseInt(time) || 0;
-  }
-
-  // Get status
-  getStatus() {
-    return {
-      countDowntime: this.countDowntime,
-      totalTimeChangeIp: this.totalTimeChangeIp,
-      autoChangeInterval: this.autoChangeInterval,
-      isCountDownRunning: !!this.nextTimeChange,
-      isTimeChangeRunning: !!this.timeChangeIP,
-      isRestoringTimer: this.isRestoringTimer,
-    };
-  }
-
-  // Force stop all timers
-  forceStopAll() {
-    if (this.nextTimeChange) {
-      clearInterval(this.nextTimeChange);
-      this.nextTimeChange = null;
-    }
-
-    if (this.timeChangeIP) {
-      clearInterval(this.timeChangeIP);
-      this.timeChangeIP = null;
-    }
-
-    this.countDowntime = 0;
-    this.totalTimeChangeIp = 0;
-    this.autoChangeInterval = 0;
-    this.isRestoringTimer = false;
-  }
-}
-
 /**
  * Location Manager - Handles location dropdown
  */
@@ -1033,6 +1031,17 @@ window.debugTimer = {
   forceStop: () => timerManager.forceStopAll(),
   manager: timerManager,
 };
+
+// FIXED: Handle popup close/unload
+window.addEventListener('beforeunload', () => {
+  // Mark popup as inactive when closing
+  timerManager.markPopupInactive();
+});
+
+window.addEventListener('unload', () => {
+  // Mark popup as inactive when unloading
+  timerManager.markPopupInactive();
+});
 
 // Setup message listener
 MessageHandler.setupMessageListener();
