@@ -186,18 +186,378 @@ class TimerManager {
     this.isPopupControlling = false;
     this.lastNotificationTime = 0;
     this.notificationDebounceTime = 2000;
+    this.syncCheckInterval = null; // FIXED: Regular sync check
   }
 
-  // Basic countdown timer for nextChangeIP display
+  // FIXED: Enhanced sync with background - more robust and frequent
+  async syncWithBackground() {
+    try {
+      console.log("TimerManager: Syncing with background...");
+      
+      // Request status from background
+      const response = await browserAPI.runtime.sendMessage({
+        greeting: "getBackgroundTimerStatus",
+        data: {},
+      });
+
+      if (response && response.isActive) {
+        console.log("TimerManager: Background timer is active", response);
+        
+        // FIXED: Check if background is currently changing IP
+        if (response.isChangingIP) {
+          console.log("TimerManager: Background is changing IP, waiting...");
+          this.showChangingIPStatus();
+          return false;
+        }
+
+        // FIXED: Calculate real-time remaining time
+        const now = Date.now();
+        const timeSinceLastUpdate = Math.floor((now - response.lastUpdateTime) / 1000);
+        const realRemainingTime = Math.max(0, response.remainingTime - timeSinceLastUpdate);
+
+        console.log(`TimerManager: Syncing with background time: ${realRemainingTime}s (background: ${response.remainingTime}s, elapsed: ${timeSinceLastUpdate}s)`);
+
+        // FIXED: Update with real-time calculation
+        this.totalTimeChangeIp = realRemainingTime;
+
+        const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
+        if (element) {
+          element.value = `${realRemainingTime}`;
+        }
+
+        // FIXED: Update storage with synced time
+        StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, realRemainingTime);
+
+        // Clear any existing timer
+        this.clearTimeChangeCountdown();
+
+        if (realRemainingTime > 0) {
+          // Start countdown with synced time
+          this.isRestoringTimer = true;
+          this.startTimeChangeCountdown();
+          
+          // FIXED: Start regular sync checks
+          this.startSyncCheck();
+        } else {
+          // Timer has expired, wait for background to handle
+          console.log("TimerManager: Timer expired, waiting for background to handle");
+          return await this.resetToDefaultTime();
+        }
+
+        return true;
+      } else {
+        console.log("TimerManager: No active background timer");
+        return false;
+      }
+    } catch (error) {
+      console.error("TimerManager: Error syncing with background", error);
+      return false;
+    }
+  }
+
+  // FIXED: Start regular sync checks to maintain synchronization
+  startSyncCheck() {
+    // Clear any existing sync check
+    this.stopSyncCheck();
+
+    // FIXED: Check sync every 5 seconds
+    this.syncCheckInterval = setInterval(async () => {
+      if (!this.isPopupControlling) return;
+
+      try {
+        const response = await browserAPI.runtime.sendMessage({
+          greeting: "getBackgroundTimerStatus",
+          data: {},
+        });
+
+        if (response && response.isActive) {
+          // FIXED: Check if times are significantly out of sync
+          const now = Date.now();
+          const timeSinceLastUpdate = Math.floor((now - response.lastUpdateTime) / 1000);
+          const realRemainingTime = Math.max(0, response.remainingTime - timeSinceLastUpdate);
+          
+          const timeDiff = Math.abs(this.totalTimeChangeIp - realRemainingTime);
+          
+          if (timeDiff > 2) { // If difference is more than 2 seconds
+            console.log(`TimerManager: Timer drift detected (${timeDiff}s), resyncing`);
+            await this.syncWithBackground();
+          }
+        }
+      } catch (error) {
+        console.error("TimerManager: Sync check failed", error);
+      }
+    }, 5000);
+  }
+
+  // FIXED: Stop sync checks
+  stopSyncCheck() {
+    if (this.syncCheckInterval) {
+      clearInterval(this.syncCheckInterval);
+      this.syncCheckInterval = null;
+    }
+  }
+
+  // FIXED: Show changing IP status
+  showChangingIPStatus() {
+    const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
+    if (element) {
+      element.value = "Changing...";
+    }
+  }
+
+  // FIXED: Enhanced timer startup with better sync
+  startTimeChangeCountdown() {
+    this.clearTimeChangeCountdown();
+
+    if (!this.totalTimeChangeIp) return;
+
+    console.log(`TimerManager: Starting countdown with ${this.totalTimeChangeIp}s`);
+    this.isPopupControlling = true;
+
+    // FIXED: Start sync checks when timer starts
+    this.startSyncCheck();
+
+    this.timeChangeIP = setInterval(async () => {
+      const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
+      if (!element) {
+        this.clearTimeChangeCountdown();
+        return;
+      }
+
+      element.value = `${this.totalTimeChangeIp}`;
+      this.totalTimeChangeIp--;
+      this.lastUpdateTime = Date.now();
+
+      // Update popup activity
+      this.updatePopupActivity();
+
+      // FIXED: When timer reaches 0, handle gracefully
+      if (this.totalTimeChangeIp < 0) {
+        console.log("TimerManager: Timer expired, handling auto change cycle");
+        
+        // Clear current timer
+        this.clearTimeChangeCountdown();
+        
+        // Show changing status
+        this.showChangingIPStatus();
+        
+        // FIXED: Wait for background to handle the change, then reset
+        await this.handleTimerExpiredWithWait();
+        
+        return;
+      }
+
+      // Update localStorage
+      const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+      if (isAutoChangeIP) {
+        StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, this.totalTimeChangeIp);
+      }
+    }, 1000);
+  }
+
+  // FIXED: Handle timer expiration with proper waiting
+  async handleTimerExpiredWithWait() {
+    try {
+      // Step 1: Wait for background to complete IP change
+      let attempts = 0;
+      const maxAttempts = 30; // 30 seconds max wait
+      
+      while (attempts < maxAttempts) {
+        await this.sleep(1000);
+        attempts++;
+        
+        try {
+          const response = await browserAPI.runtime.sendMessage({
+            greeting: "getBackgroundTimerStatus",
+            data: {},
+          });
+          
+          // FIXED: Check if background has reset the timer (new cycle started)
+          if (response && response.isActive && response.remainingTime > 0 && response.remainingTime < response.originalDuration) {
+            console.log("TimerManager: Background has started new cycle, syncing");
+            await this.syncWithBackground();
+            return;
+          }
+        } catch (error) {
+          console.error("TimerManager: Error checking background status", error);
+        }
+      }
+      
+      // Step 2: If background didn't reset, do it ourselves
+      console.log("TimerManager: Background didn't reset, resetting locally");
+      await this.resetToDefaultTime();
+      
+    } catch (error) {
+      console.error("TimerManager: Error handling timer expiration", error);
+      await this.resetToDefaultTime();
+    }
+  }
+
+  // FIXED: Enhanced restore with better sync logic
+  async restoreTimerFromStorage() {
+    const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+    if (!JSON.parse(isAutoChangeIP)) {
+      return false;
+    }
+
+    console.log("TimerManager: Restoring timer from storage...");
+    
+    // FIXED: Always try to sync with background first
+    const synced = await this.syncWithBackground();
+    if (synced) {
+      console.log("TimerManager: Successfully synced with background");
+      return true;
+    }
+
+    // FIXED: If sync fails, try localStorage but with validation
+    console.log("TimerManager: Background sync failed, checking localStorage...");
+    const savedTime = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
+    const defaultTime = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT);
+
+    // FIXED: Only use saved time if it's reasonable (not too old)
+    if (savedTime && parseInt(savedTime) > 0 && parseInt(savedTime) <= parseInt(defaultTime || 3600)) {
+      console.log(`TimerManager: Using saved time: ${savedTime}s`);
+      this.clearTimeChangeCountdown();
+      this.totalTimeChangeIp = parseInt(savedTime);
+      this.isRestoringTimer = true;
+      this.startTimeChangeCountdown();
+      return true;
+    } else if (defaultTime) {
+      console.log(`TimerManager: Using default time: ${defaultTime}s`);
+      const freshTime = parseInt(defaultTime);
+      this.clearTimeChangeCountdown();
+      this.totalTimeChangeIp = freshTime;
+      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, freshTime);
+      this.isRestoringTimer = false;
+      this.startTimeChangeCountdown();
+      return true;
+    }
+
+    console.log("TimerManager: No valid time found for restore");
+    return false;
+  }
+
+  // FIXED: Enhanced clear method
+  clearTimeChangeCountdown() {
+    if (this.timeChangeIP) {
+      clearInterval(this.timeChangeIP);
+      this.timeChangeIP = null;
+    }
+
+    // FIXED: Stop sync checks when clearing
+    this.stopSyncCheck();
+    
+    // Mark popup as inactive
+    this.markPopupInactive();
+  }
+
+  // FIXED: Enhanced clear all method
+  clearAll() {
+    this.clearCountDown();
+    this.clearTimeChangeCountdown();
+    this.stopSyncCheck(); // FIXED: Stop sync checks
+    this.countDowntime = 0;
+    this.totalTimeChangeIp = 0;
+    this.autoChangeInterval = 0;
+    this.isRestoringTimer = false;
+    this.isPopupControlling = false;
+    this.markPopupInactive();
+  }
+
+  // FIXED: Enhanced force stop
+  forceStopAll() {
+    if (this.nextTimeChange) {
+      clearInterval(this.nextTimeChange);
+      this.nextTimeChange = null;
+    }
+
+    if (this.timeChangeIP) {
+      clearInterval(this.timeChangeIP);
+      this.timeChangeIP = null;
+    }
+
+    this.stopSyncCheck(); // FIXED: Stop sync checks
+
+    this.countDowntime = 0;
+    this.totalTimeChangeIp = 0;
+    this.autoChangeInterval = 0;
+    this.isRestoringTimer = false;
+    this.isPopupControlling = false;
+    this.lastUpdateTime = 0;
+    this.lastNotificationTime = 0;
+
+    this.markPopupInactive();
+  }
+
+  // Rest of the methods remain the same...
+  sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  updatePopupActivity() {
+    try {
+      browserAPI.storage.local.set({
+        popupTimerActive: true,
+        popupLastUpdate: Date.now(),
+        popupTimerValue: this.totalTimeChangeIp,
+        popupControlling: this.isPopupControlling,
+      });
+    } catch (error) {
+      console.error("Error updating popup activity:", error);
+    }
+  }
+
+  markPopupInactive() {
+    this.isPopupControlling = false;
+    try {
+      browserAPI.storage.local.set({
+        popupTimerActive: false,
+        popupLastUpdate: Date.now(),
+        popupControlling: false,
+      });
+    } catch (error) {
+      console.error("Error marking popup inactive:", error);
+    }
+  }
+
+  async resetToDefaultTime() {
+    const defaultTime = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT);
+    const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+
+    if (JSON.parse(isAutoChangeIP) && defaultTime) {
+      const resetTime = parseInt(defaultTime);
+
+      console.log(`TimerManager: Resetting to default time: ${resetTime}s`);
+
+      this.clearTimeChangeCountdown();
+      this.totalTimeChangeIp = resetTime;
+
+      // Update storage
+      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, resetTime);
+
+      // Update display
+      const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
+      if (element) {
+        element.value = `${resetTime}`;
+      }
+
+      // Start fresh timer
+      this.isRestoringTimer = false;
+      this.startTimeChangeCountdown();
+
+      return true;
+    }
+
+    return false;
+  }
+
   startCountDown() {
     this.clearCountDown();
 
     if (!this.countDowntime) return;
 
     this.nextTimeChange = setInterval(() => {
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
-      );
+      const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME);
       if (!element) {
         this.clearCountDown();
         return;
@@ -214,353 +574,6 @@ class TimerManager {
     }, 1000);
   }
 
-  // FIXED: Auto change timer với logic restart cycle đúng
-  startTimeChangeCountdown() {
-    this.clearTimeChangeCountdown();
-
-    if (!this.totalTimeChangeIp) return;
-
-    console.log(`Popup timer started: ${this.totalTimeChangeIp}s`);
-    this.isPopupControlling = true;
-
-    this.timeChangeIP = setInterval(async () => {
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-      );
-      if (!element) {
-        this.clearTimeChangeCountdown();
-        return;
-      }
-
-      element.value = `${this.totalTimeChangeIp}`;
-      this.totalTimeChangeIp--;
-      this.lastUpdateTime = Date.now();
-
-      // Update popup activity in storage for background sync
-      this.updatePopupActivity();
-
-      // FIXED: Khi timer về 0, reset về default và tiếp tục cycle
-      if (this.totalTimeChangeIp < 0) {
-        console.log("Popup timer expired, handling auto change cycle");
-
-        // Clear current timer
-        this.clearTimeChangeCountdown();
-
-        // Mark popup as inactive
-        this.markPopupInactive();
-
-        // FIXED: Reset về default time và restart cycle
-        await this.handleTimerExpiredWithRestart();
-
-        return;
-      }
-
-      // Update localStorage
-      const isAutoChangeIP = StorageManager.get(
-        POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-      );
-      if (isAutoChangeIP) {
-        StorageManager.set(
-          POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-          this.totalTimeChangeIp
-        );
-      }
-    }, 1000);
-  }
-
-  // FIXED: Xử lý khi timer hết hạn - reset và tiếp tục cycle
-  async handleTimerExpiredWithRestart() {
-    try {
-      // Step 1: Notify background to change IP
-      await this.notifyBackgroundTimerExpiredDebounced();
-
-      // Step 2: Wait a bit for API call to complete
-      await this.sleep(2000);
-
-      // Step 3: Reset timer to default and restart
-      const defaultTime = StorageManager.get(
-        POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-      );
-      const isAutoChangeIP = StorageManager.get(
-        POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-      );
-
-      if (JSON.parse(isAutoChangeIP) && defaultTime) {
-        const resetTime = parseInt(defaultTime);
-
-        console.log(`Resetting timer to default: ${resetTime}s`);
-
-        // Reset storage
-        StorageManager.set(
-          POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-          resetTime
-        );
-
-        // Reset local timer
-        this.totalTimeChangeIp = resetTime;
-
-        // Update display
-        const element = document.getElementById(
-          POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-        );
-        if (element) {
-          element.value = `${resetTime}`;
-        }
-
-        // Restart timer cycle
-        this.isRestoringTimer = false; // Fresh cycle, not restore
-        this.startTimeChangeCountdown();
-
-        console.log("Timer cycle restarted successfully");
-      }
-    } catch (error) {
-      console.error("Error handling timer expired with restart:", error);
-    }
-  }
-
-  // Helper sleep method
-  sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  // FIXED: Debounced notification to prevent rapid calls
-  async notifyBackgroundTimerExpiredDebounced() {
-    const now = Date.now();
-    const timeSinceLastNotification = now - this.lastNotificationTime;
-
-    if (timeSinceLastNotification < this.notificationDebounceTime) {
-      console.log("Popup: Debouncing timer expired notification");
-      return;
-    }
-
-    this.lastNotificationTime = now;
-
-    try {
-      const response = await browserAPI.runtime.sendMessage({
-        greeting: "popupTimerExpired",
-        data: { timestamp: now },
-      });
-      console.log("Background notified of timer expiration:", response);
-    } catch (error) {
-      console.error("Error notifying background:", error);
-      // Fallback: set storage flag for background to check
-      try {
-        await browserAPI.storage.local.set({
-          timerExpiredFlag: true,
-          timerExpiredTime: now,
-        });
-      } catch (storageError) {
-        console.error("Error setting timer expired flag:", storageError);
-      }
-    }
-  }
-
-  // Update popup activity for background sync
-  updatePopupActivity() {
-    try {
-      browserAPI.storage.local.set({
-        popupTimerActive: true,
-        popupLastUpdate: Date.now(),
-        popupTimerValue: this.totalTimeChangeIp,
-        popupControlling: this.isPopupControlling,
-      });
-    } catch (error) {
-      console.error("Error updating popup activity:", error);
-    }
-  }
-
-  // Mark popup as inactive
-  markPopupInactive() {
-    this.isPopupControlling = false;
-    try {
-      browserAPI.storage.local.set({
-        popupTimerActive: false,
-        popupLastUpdate: Date.now(),
-        popupControlling: false,
-      });
-    } catch (error) {
-      console.error("Error marking popup inactive:", error);
-    }
-  }
-
-  // FIXED: Improved sync with background timer - ưu tiên background time
-  async syncWithBackground() {
-    try {
-      // Request status from background
-      const response = await browserAPI.runtime.sendMessage({
-        greeting: "getBackgroundTimerStatus",
-        data: {},
-      });
-
-      if (response && response.remainingTime > 0) {
-        // FIXED: Check if background is currently changing IP
-        if (response.isChangingIP) {
-          console.log("Background is changing IP, waiting...");
-          return false;
-        }
-
-        console.log(
-          `Syncing with background: ${response.remainingTime}s remaining`
-        );
-
-        // FIXED: Luôn ưu tiên thời gian từ background
-        this.totalTimeChangeIp = response.remainingTime;
-
-        const element = document.getElementById(
-          POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-        );
-        if (element) {
-          element.value = `${response.remainingTime}`;
-        }
-
-        // FIXED: Update storage với thời gian từ background
-        StorageManager.set(
-          POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-          response.remainingTime
-        );
-
-        // Start countdown with synced time
-        this.isRestoringTimer = true;
-        this.startTimeChangeCountdown();
-
-        return true;
-      } else if (response && response.remainingTime === 0) {
-        // FIXED: Nếu background timer = 0, reset về default
-        console.log("Background timer is 0, resetting to default");
-        return await this.resetToDefaultTime();
-      }
-    } catch (error) {
-      console.error("Error syncing with background:", error);
-    }
-
-    return false;
-  }
-
-  // FIXED: Reset về default time
-  async resetToDefaultTime() {
-    const defaultTime = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-    );
-    const isAutoChangeIP = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-    );
-
-    if (JSON.parse(isAutoChangeIP) && defaultTime) {
-      const resetTime = parseInt(defaultTime);
-
-      console.log(`Resetting to default time: ${resetTime}s`);
-
-      this.clearTimeChangeCountdown();
-      this.totalTimeChangeIp = resetTime;
-
-      // Update storage
-      StorageManager.set(
-        POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-        resetTime
-      );
-
-      // Update display
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-      );
-      if (element) {
-        element.value = `${resetTime}`;
-      }
-
-      // Start fresh timer
-      this.isRestoringTimer = false;
-      this.startTimeChangeCountdown();
-
-      return true;
-    }
-
-    return false;
-  }
-
-  // FIXED: Restore timer với logic ưu tiên background
-  async restoreTimerFromStorage() {
-    const isAutoChangeIP = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-    );
-    if (!JSON.parse(isAutoChangeIP)) {
-      return false;
-    }
-
-    // FIXED: Luôn thử sync với background trước
-    console.log("Attempting to sync with background...");
-    const synced = await this.syncWithBackground();
-    if (synced) {
-      console.log("Successfully synced with background");
-      return true;
-    }
-
-    // FIXED: Nếu không sync được, kiểm tra localStorage
-    console.log("Background sync failed, checking localStorage...");
-    const savedTime = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP
-    );
-    const defaultTime = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-    );
-
-    if (savedTime && parseInt(savedTime) > 0) {
-      console.log(`Using saved time: ${savedTime}s`);
-      this.clearTimeChangeCountdown();
-      this.totalTimeChangeIp = parseInt(savedTime);
-      this.isRestoringTimer = true;
-      this.startTimeChangeCountdown();
-      return true;
-    } else if (defaultTime) {
-      console.log(`Using default time: ${defaultTime}s`);
-      const freshTime = parseInt(defaultTime);
-      this.clearTimeChangeCountdown();
-      this.totalTimeChangeIp = freshTime;
-      StorageManager.set(
-        POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-        freshTime
-      );
-      this.isRestoringTimer = false;
-      this.startTimeChangeCountdown();
-      return true;
-    }
-
-    console.log("No valid time found for restore");
-    return false;
-  }
-
-  // Reset auto change timer to default value (called externally)
-  resetAutoChangeTimer() {
-    const isAutoChangeIP = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-    );
-    const defaultTime = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-    );
-
-    if (JSON.parse(isAutoChangeIP) && defaultTime) {
-      const timeValue = parseInt(defaultTime);
-
-      this.clearTimeChangeCountdown();
-      this.totalTimeChangeIp = timeValue;
-
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-      );
-      if (element) {
-        element.value = `${timeValue}`;
-      }
-
-      StorageManager.set(
-        POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
-        timeValue
-      );
-
-      // Update popup activity
-      this.updatePopupActivity();
-    }
-  }
-
-  // Clear functions
   clearCountDown() {
     if (this.nextTimeChange) {
       clearInterval(this.nextTimeChange);
@@ -568,28 +581,6 @@ class TimerManager {
     }
   }
 
-  clearTimeChangeCountdown() {
-    if (this.timeChangeIP) {
-      clearInterval(this.timeChangeIP);
-      this.timeChangeIP = null;
-    }
-
-    // Mark popup as inactive when clearing timer
-    this.markPopupInactive();
-  }
-
-  clearAll() {
-    this.clearCountDown();
-    this.clearTimeChangeCountdown();
-    this.countDowntime = 0;
-    this.totalTimeChangeIp = 0;
-    this.autoChangeInterval = 0;
-    this.isRestoringTimer = false;
-    this.isPopupControlling = false;
-    this.markPopupInactive();
-  }
-
-  // Setters
   setCountDowntime(time) {
     this.countDowntime = parseInt(time) || 0;
   }
@@ -598,7 +589,26 @@ class TimerManager {
     this.totalTimeChangeIp = parseInt(time) || 0;
   }
 
-  // Get status
+  resetAutoChangeTimer() {
+    const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+    const defaultTime = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT);
+
+    if (JSON.parse(isAutoChangeIP) && defaultTime) {
+      const timeValue = parseInt(defaultTime);
+
+      this.clearTimeChangeCountdown();
+      this.totalTimeChangeIp = timeValue;
+
+      const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
+      if (element) {
+        element.value = `${timeValue}`;
+      }
+
+      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP, timeValue);
+      this.updatePopupActivity();
+    }
+  }
+
   getStatus() {
     return {
       countDowntime: this.countDowntime,
@@ -610,33 +620,10 @@ class TimerManager {
       isPopupControlling: this.isPopupControlling,
       lastUpdateTime: this.lastUpdateTime,
       lastNotificationTime: this.lastNotificationTime,
+      hasSyncCheck: !!this.syncCheckInterval,
     };
   }
 
-  // FIXED: Improved force stop with background notification
-  forceStopAll() {
-    if (this.nextTimeChange) {
-      clearInterval(this.nextTimeChange);
-      this.nextTimeChange = null;
-    }
-
-    if (this.timeChangeIP) {
-      clearInterval(this.timeChangeIP);
-      this.timeChangeIP = null;
-    }
-
-    this.countDowntime = 0;
-    this.totalTimeChangeIp = 0;
-    this.autoChangeInterval = 0;
-    this.isRestoringTimer = false;
-    this.isPopupControlling = false;
-    this.lastUpdateTime = 0;
-    this.lastNotificationTime = 0;
-
-    this.markPopupInactive();
-  }
-
-  // FIXED: Notify background when popup is about to close
   async notifyPopupClosing() {
     try {
       await browserAPI.runtime.sendMessage({
@@ -1265,16 +1252,14 @@ window.debugTimer = {
 };
 
 window.addEventListener("beforeunload", async () => {
-  // Notify background that popup is closing
+  timerManager.stopSyncCheck();
   await timerManager.notifyPopupClosing();
-  // Mark popup as inactive
   timerManager.markPopupInactive();
 });
 
 window.addEventListener("unload", async () => {
-  // Notify background that popup is closing
+  timerManager.stopSyncCheck();
   await timerManager.notifyPopupClosing();
-  // Mark popup as inactive
   timerManager.markPopupInactive();
 });
 
@@ -1282,21 +1267,20 @@ window.addEventListener("unload", async () => {
 document.addEventListener("visibilitychange", async () => {
   if (document.hidden) {
     // Popup is hidden (user switched tabs or minimized)
-    console.log("Popup hidden, notifying background");
+    console.log("Popup hidden, stopping sync checks");
+    timerManager.stopSyncCheck();
     await timerManager.notifyPopupClosing();
   } else {
     // Popup is visible again
-    console.log("Popup visible, syncing with background");
-    const isAutoChangeIP = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-    );
-    const proxyConnected = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
-    );
+    console.log("Popup visible, resyncing with background");
+    const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+    const proxyConnected = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
 
     if (JSON.parse(isAutoChangeIP) && proxyConnected === "true") {
-      // FIXED: Sync lại với background khi popup visible
-      await timerManager.syncWithBackground();
+      // FIXED: Force resync when popup becomes visible
+      setTimeout(async () => {
+        await timerManager.syncWithBackground();
+      }, 500);
     }
   }
 });
@@ -1310,8 +1294,32 @@ EventManager.setupEventListeners();
 // Initialize app
 AppInitializer.initialize();
 
-
 window.debugTimer = {
+  // Enhanced sync test
+  async testSync() {
+    console.log("🔄 Testing sync...");
+    
+    const backgroundStatus = await this.getBackgroundStatus();
+    const popupStatus = timerManager.getStatus();
+    
+    console.log("📊 Background status:", backgroundStatus);
+    console.log("📊 Popup status:", popupStatus);
+    
+    if (backgroundStatus && backgroundStatus.isActive) {
+      console.log("🔄 Forcing sync...");
+      const synced = await timerManager.syncWithBackground();
+      console.log("Sync result:", synced ? "✅ Success" : "❌ Failed");
+      
+      // Check sync accuracy
+      setTimeout(async () => {
+        const newStatus = await this.getBackgroundStatus();
+        const newPopupStatus = timerManager.getStatus();
+        const timeDiff = Math.abs(newStatus.remainingTime - newPopupStatus.totalTimeChangeIp);
+        console.log(`⏰ Time difference after sync: ${timeDiff}s`);
+      }, 2000);
+    }
+  },
+
   // Test background connection
   async testBackground() {
     try {
@@ -1342,90 +1350,6 @@ window.debugTimer = {
     }
   },
 
-  // Check storage values
-  checkStorage() {
-    const keys = [
-      'apiKey',
-      'isAutoChangeIP',
-      'timeAutoChangeIP',
-      'timeAutoChangeIPDefault',
-      'proxyConnected'
-    ];
-
-    console.log("💾 LocalStorage values:");
-    keys.forEach(key => {
-      const value = localStorage.getItem(key);
-      console.log(`  ${key}: ${value}`);
-    });
-  },
-
-  // Check browser storage
-  async checkBrowserStorage() {
-    try {
-      const result = await browserAPI.storage.local.get(['autoChangeState']);
-      console.log("🔧 Browser storage (autoChangeState):", result.autoChangeState);
-      return result.autoChangeState;
-    } catch (error) {
-      console.error("❌ Failed to check browser storage:", error);
-      return null;
-    }
-  },
-
-  // Test auto change IP setup
-  async testAutoChangeSetup() {
-    const apiKey = localStorage.getItem('apiKey');
-    const isAutoChangeIP = localStorage.getItem('isAutoChangeIP');
-    const timeAutoChangeIP = localStorage.getItem('timeAutoChangeIP');
-    const timeAutoChangeIPDefault = localStorage.getItem('timeAutoChangeIPDefault');
-
-    console.log("🧪 Testing auto change IP setup:");
-    console.log("  API Key:", apiKey ? "✅ Present" : "❌ Missing");
-    console.log("  Auto Change IP:", isAutoChangeIP);
-    console.log("  Time Auto Change IP:", timeAutoChangeIP);
-    console.log("  Default Time:", timeAutoChangeIPDefault);
-
-    if (apiKey && JSON.parse(isAutoChangeIP || 'false')) {
-      console.log("✅ Auto change IP should be working");
-      
-      // Test the actual config
-      const config = {
-        apiKey: apiKey,
-        isAutoChangeIP: true,
-        timeAutoChangeIP: timeAutoChangeIP || timeAutoChangeIPDefault || 60,
-        proxyType: localStorage.getItem('proxyType') || 'ipv4',
-        location: document.getElementById('location_select')?.value || null
-      };
-
-      console.log("🔧 Config that would be sent to background:", config);
-
-      // Test sending to background
-      try {
-        await browserAPI.runtime.sendMessage({
-          greeting: "AUTO_CHANGE_IP",
-          data: config
-        });
-        console.log("✅ AUTO_CHANGE_IP message sent successfully");
-      } catch (error) {
-        console.error("❌ Failed to send AUTO_CHANGE_IP:", error);
-      }
-    } else {
-      console.log("❌ Auto change IP not properly configured");
-    }
-  },
-
-  // Force sync with background
-  async forceSync() {
-    console.log("🔄 Forcing sync with background...");
-    try {
-      const synced = await timerManager.syncWithBackground();
-      console.log("Sync result:", synced ? "✅ Success" : "❌ Failed");
-      return synced;
-    } catch (error) {
-      console.error("❌ Sync failed:", error);
-      return false;
-    }
-  },
-
   // Get popup timer status
   getPopupTimerStatus() {
     const status = timerManager.getStatus();
@@ -1433,91 +1357,39 @@ window.debugTimer = {
     return status;
   },
 
-  // Test complete flow
-  async testCompleteFlow() {
-    console.log("🚀 Testing complete timer flow...");
+  // Test complete sync flow
+  async testCompleteSync() {
+    console.log("🚀 Testing complete sync flow...");
     
-    // Step 1: Test background connection
-    console.log("\n1️⃣ Testing background connection...");
+    // Test background connection
     await this.testBackground();
     
-    // Step 2: Check storage
-    console.log("\n2️⃣ Checking storage...");
-    this.checkStorage();
-    await this.checkBrowserStorage();
+    // Get initial status
+    const backgroundStatus = await this.getBackgroundStatus();
+    const popupStatus = this.getPopupTimerStatus();
     
-    // Step 3: Test auto change setup
-    console.log("\n3️⃣ Testing auto change setup...");
-    await this.testAutoChangeSetup();
+    console.log("Before sync - Background:", backgroundStatus?.remainingTime, "Popup:", popupStatus.totalTimeChangeIp);
     
-    // Step 4: Get current status
-    console.log("\n4️⃣ Getting current status...");
-    await this.getBackgroundStatus();
-    this.getPopupTimerStatus();
+    // Force sync
+    await this.testSync();
     
-    // Step 5: Force sync
-    console.log("\n5️⃣ Testing sync...");
-    await this.forceSync();
-    
-    console.log("\n✨ Test complete!");
-  },
-
-  // Manual start timer (for testing)
-  async manualStart(seconds = 10) {
-    console.log(`🔧 Manually starting timer with ${seconds} seconds...`);
-    
-    const config = {
-      apiKey: localStorage.getItem('apiKey'),
-      isAutoChangeIP: true,
-      timeAutoChangeIP: seconds,
-      proxyType: localStorage.getItem('proxyType') || 'ipv4',
-      location: document.getElementById('location_select')?.value || null
-    };
-
-    try {
-      await browserAPI.runtime.sendMessage({
-        greeting: "AUTO_CHANGE_IP", 
-        data: config
-      });
-      console.log("✅ Manual start successful");
+    // Check final status
+    setTimeout(async () => {
+      const finalBackgroundStatus = await this.getBackgroundStatus();
+      const finalPopupStatus = this.getPopupTimerStatus();
       
-      // Wait a bit then check status
-      setTimeout(async () => {
-        await this.getBackgroundStatus();
-        this.getPopupTimerStatus();
-      }, 2000);
-    } catch (error) {
-      console.error("❌ Manual start failed:", error);
-    }
+      console.log("After sync - Background:", finalBackgroundStatus?.remainingTime, "Popup:", finalPopupStatus.totalTimeChangeIp);
+      
+      const timeDiff = Math.abs(finalBackgroundStatus?.remainingTime - finalPopupStatus.totalTimeChangeIp);
+      console.log(`✨ Final time difference: ${timeDiff}s`);
+      
+      if (timeDiff <= 1) {
+        console.log("🎉 Sync test PASSED!");
+      } else {
+        console.log("❌ Sync test FAILED - times not synchronized");
+      }
+    }, 3000);
   },
 
-  // Stop timer
-  async stop() {
-    try {
-      await browserAPI.runtime.sendMessage({
-        greeting: "cancelALL",
-        data: { apiKey: localStorage.getItem('apiKey') }
-      });
-      console.log("✅ Timer stopped");
-    } catch (error) {
-      console.error("❌ Failed to stop timer:", error);
-    }
-  }
+  manager: timerManager
 };
-
-// Auto-run basic test
-console.log("🎯 Timer Debug Tools Loaded!");
-console.log("Available commands:");
-console.log("  debugTimer.testCompleteFlow() - Run full test");
-console.log("  debugTimer.testBackground() - Test background connection");
-console.log("  debugTimer.getBackgroundStatus() - Get background timer status");
-console.log("  debugTimer.getPopupTimerStatus() - Get popup timer status");
-console.log("  debugTimer.checkStorage() - Check localStorage");
-console.log("  debugTimer.forceSync() - Force sync with background");
-console.log("  debugTimer.manualStart(60) - Manually start 60s timer");
-console.log("  debugTimer.stop() - Stop timer");
-
-// Run basic connection test
-debugTimer.testBackground().then(() => {
-  console.log("🔍 Run debugTimer.testCompleteFlow() to run full diagnostic");
-});

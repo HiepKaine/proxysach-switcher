@@ -382,6 +382,7 @@ class AutoChangeManager {
     this.lastChangeTime = 0;
     this.changeDebounce = 3000; // 3 second debounce
     this.startTime = 0;
+    this.lastUpdateTime = 0; // FIXED: Track last update time
   }
 
   async start(config) {
@@ -400,8 +401,9 @@ class AutoChangeManager {
     this.remainingTime = this.originalDuration;
     this.isRunning = true;
     this.startTime = Date.now();
+    this.lastUpdateTime = Date.now(); // FIXED: Initialize last update time
 
-    // Save state
+    // Save state immediately
     await this.saveState();
 
     console.log(`AutoChangeManager: Started with ${this.remainingTime}s`);
@@ -415,10 +417,11 @@ class AutoChangeManager {
       if (!this.isRunning) return;
 
       this.remainingTime--;
+      this.lastUpdateTime = Date.now(); // FIXED: Update last update time
       
       console.log(`AutoChangeManager: ${this.remainingTime}s remaining`);
 
-      // Save current state
+      // Save current state every update
       await this.saveState();
 
       if (this.remainingTime <= 0) {
@@ -465,9 +468,10 @@ class AutoChangeManager {
         // Set new proxy
         await proxyManager.handleProxyResponse(result.data, this.config.apiKey, this.config.proxyType);
         
-        // Reset timer for next cycle
+        // FIXED: Reset timer for next cycle with proper state management
         this.remainingTime = this.originalDuration;
         this.startTime = Date.now();
+        this.lastUpdateTime = Date.now();
         await this.saveState();
         
         // Notify popup of success
@@ -486,6 +490,7 @@ class AutoChangeManager {
         // Retry after 30 seconds on error
         if (this.isRunning) {
           this.remainingTime = 30;
+          this.lastUpdateTime = Date.now();
           await this.saveState();
           this.scheduleTimer();
         }
@@ -496,6 +501,7 @@ class AutoChangeManager {
       // Retry after 30 seconds on error
       if (this.isRunning) {
         this.remainingTime = 30;
+        this.lastUpdateTime = Date.now();
         await this.saveState();
         this.scheduleTimer();
       }
@@ -504,23 +510,31 @@ class AutoChangeManager {
     }
   }
 
+  // FIXED: Enhanced state saving with better tracking
   async saveState() {
     try {
+      const state = {
+        isRunning: this.isRunning,
+        remainingTime: this.remainingTime,
+        originalDuration: this.originalDuration,
+        config: this.config,
+        startTime: this.startTime,
+        lastUpdateTime: this.lastUpdateTime,
+        isChangingIP: this.isChangingIP,
+        version: Date.now() // Version for conflict resolution
+      };
+
       await browserAPI.storage.local.set({
-        autoChangeState: {
-          isRunning: this.isRunning,
-          remainingTime: this.remainingTime,
-          originalDuration: this.originalDuration,
-          config: this.config,
-          startTime: this.startTime,
-          lastUpdate: Date.now()
-        }
+        autoChangeState: state
       });
+
+      console.log("AutoChangeManager: State saved", state);
     } catch (error) {
       console.error("AutoChangeManager: Error saving state", error);
     }
   }
 
+  // FIXED: Enhanced state loading with time synchronization
   async loadState() {
     try {
       const result = await browserAPI.storage.local.get(['autoChangeState']);
@@ -529,29 +543,38 @@ class AutoChangeManager {
       if (state && state.isRunning) {
         console.log("AutoChangeManager: Loading previous state", state);
         
-        this.isRunning = state.isRunning;
-        this.remainingTime = state.remainingTime;
-        this.originalDuration = state.originalDuration;
-        this.config = state.config;
-        this.startTime = state.startTime;
-        
-        // Check if state is still valid (not too old)
         const now = Date.now();
-        const timeSinceLastUpdate = Math.floor((now - state.lastUpdate) / 1000);
+        const timeSinceLastUpdate = Math.floor((now - state.lastUpdateTime) / 1000);
         
-        if (timeSinceLastUpdate < 300) { // 5 minutes threshold
-          // Adjust remaining time based on elapsed time
-          this.remainingTime = Math.max(0, this.remainingTime - timeSinceLastUpdate);
+        // FIXED: More robust time calculation
+        if (timeSinceLastUpdate < 600) { // 10 minutes threshold
+          this.isRunning = state.isRunning;
+          this.originalDuration = state.originalDuration;
+          this.config = state.config;
+          this.startTime = state.startTime;
+          this.isChangingIP = state.isChangingIP || false;
+          
+          // FIXED: Calculate remaining time based on elapsed time
+          this.remainingTime = Math.max(0, state.remainingTime - timeSinceLastUpdate);
+          this.lastUpdateTime = now;
+          
+          console.log(`AutoChangeManager: Calculated remaining time: ${this.remainingTime}s (elapsed: ${timeSinceLastUpdate}s)`);
+          
+          // Save updated state
+          await this.saveState();
           
           if (this.remainingTime > 0) {
             console.log(`AutoChangeManager: Resuming with ${this.remainingTime}s remaining`);
             this.scheduleTimer();
             return true;
-          } else {
+          } else if (!this.isChangingIP) {
             console.log("AutoChangeManager: Timer expired while background was inactive");
             await this.executeAutoChange();
             return true;
           }
+        } else {
+          console.log("AutoChangeManager: State too old, clearing");
+          await this.clearState();
         }
       }
     } catch (error) {
@@ -559,6 +582,31 @@ class AutoChangeManager {
     }
     
     return false;
+  }
+
+  // FIXED: Enhanced status with better synchronization data
+  getStatus() {
+    return {
+      isActive: this.isRunning,
+      remainingTime: this.remainingTime,
+      originalDuration: this.originalDuration,
+      isChangingIP: this.isChangingIP,
+      config: this.config,
+      lastChangeTime: this.lastChangeTime,
+      startTime: this.startTime,
+      lastUpdateTime: this.lastUpdateTime,
+      currentTime: Date.now() // Current time for sync calculation
+    };
+  }
+
+  // FIXED: Clear state method
+  async clearState() {
+    try {
+      await browserAPI.storage.local.remove(['autoChangeState']);
+      console.log("AutoChangeManager: State cleared");
+    } catch (error) {
+      console.error("AutoChangeManager: Error clearing state", error);
+    }
   }
 
   async stop() {
@@ -572,27 +620,13 @@ class AutoChangeManager {
     }
 
     // Clear state
-    try {
-      await browserAPI.storage.local.remove(['autoChangeState']);
-    } catch (error) {
-      console.error("AutoChangeManager: Error clearing state", error);
-    }
+    await this.clearState();
 
     this.remainingTime = 0;
     this.originalDuration = 0;
     this.config = null;
     this.isChangingIP = false;
-  }
-
-  getStatus() {
-    return {
-      isActive: this.isRunning,
-      remainingTime: this.remainingTime,
-      originalDuration: this.originalDuration,
-      isChangingIP: this.isChangingIP,
-      config: this.config,
-      lastChangeTime: this.lastChangeTime
-    };
+    this.lastUpdateTime = 0;
   }
 
   sleep(ms) {
