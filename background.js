@@ -379,10 +379,15 @@ class AutoChangeManager {
     this.config = null;
     this.isPopupOpen = false;
     this.lastSyncTime = 0;
+    // FIXED: Add flags to prevent duplicate calls
+    this.isChangingIP = false;
+    this.lastChangeTime = 0;
+    this.changeIPDebounceTime = 2000; // 2 seconds debounce
   }
 
   async start(config) {
-    this.stop();
+    // FIXED: Stop any existing operations first
+    await this.stop();
 
     if (!config.isAutoChangeIP || config.timeAutoChangeIP <= 0) {
       return;
@@ -397,7 +402,8 @@ class AutoChangeManager {
       backgroundTimerConfig: config,
       backgroundTimerStartTime: Date.now(),
       backgroundTimerDuration: config.timeAutoChangeIP,
-      backgroundTimerActive: true
+      backgroundTimerActive: true,
+      backgroundManagerActive: true // FIXED: Mark background as active
     });
 
     console.log(`Background timer started: ${this.timeInterval}s`);
@@ -407,12 +413,20 @@ class AutoChangeManager {
   scheduleNextChange() {
     if (!this.isRunning) return;
 
-    // FIXED: Check every second for more responsive timer
+    // FIXED: Check every second but with better coordination
     this.currentTimer = setTimeout(async () => {
       if (!this.isRunning) return;
 
+      // FIXED: Check if we're already changing IP
+      if (this.isChangingIP) {
+        console.log("Background: Already changing IP, skipping");
+        this.scheduleNextChange();
+        return;
+      }
+
       // Check for timer expired flag from popup
-      await this.checkTimerExpiredFlag();
+      const flagChecked = await this.checkTimerExpiredFlag();
+      if (flagChecked) return; // Already handled
 
       // Get current remaining time
       const remainingTime = await this.getRemainingTime();
@@ -426,38 +440,45 @@ class AutoChangeManager {
         const popupHandling = await this.checkPopupTimerStatus();
         
         if (!popupHandling) {
-          // Popup closed, but timer not expired yet - continue monitoring
           console.log(`Background monitoring timer: ${remainingTime}s remaining`);
         } else {
-          // Popup is handling timer
           console.log(`Popup handling timer: ${remainingTime}s remaining`);
         }
         
-        // Schedule next check in 1 second for responsiveness
-        this.timeInterval = 1; // Check every second
+        // Schedule next check
         this.scheduleNextChange();
       }
-    }, Math.min(this.timeInterval * 1000, 1000)); // Check at least every second
+    }, 1000);
   }
 
-  // FIXED: Check for timer expired flag from popup (fallback)
+  // FIXED: Improved timer expired flag check with debouncing
   async checkTimerExpiredFlag() {
     try {
       const result = await browserAPI.storage.local.get(['timerExpiredFlag', 'timerExpiredTime']);
       
       if (result.timerExpiredFlag) {
+        const now = Date.now();
+        const timeSinceLastChange = now - this.lastChangeTime;
+        
+        // FIXED: Debounce to prevent rapid calls
+        if (timeSinceLastChange < this.changeIPDebounceTime) {
+          console.log("Background: Debouncing timer expired flag");
+          await browserAPI.storage.local.remove(['timerExpiredFlag', 'timerExpiredTime']);
+          return true;
+        }
+
         console.log("Found timer expired flag from popup");
         
-        // Clear the flag
+        // Clear the flag immediately
         await browserAPI.storage.local.remove(['timerExpiredFlag', 'timerExpiredTime']);
         
-        // Clear current timer and execute change immediately
+        // Clear current timer and execute change
         if (this.currentTimer) {
           clearTimeout(this.currentTimer);
           this.currentTimer = null;
         }
         
-        // Execute auto change immediately
+        // Execute auto change
         await this.handleAutoChange();
         return true;
       }
@@ -471,7 +492,6 @@ class AutoChangeManager {
   // Check if popup is open and handling timer
   async checkPopupTimerStatus() {
     try {
-      // Get current timer state from storage
       const result = await browserAPI.storage.local.get([
         'popupTimerActive',
         'popupLastUpdate',
@@ -489,9 +509,22 @@ class AutoChangeManager {
     }
   }
 
-  // Handle auto change when popup is closed
+  // FIXED: Handle auto change with duplicate prevention
   async handleAutoChange() {
     if (!this.isRunning) return;
+
+    // FIXED: Prevent duplicate calls
+    const now = Date.now();
+    const timeSinceLastChange = now - this.lastChangeTime;
+    
+    if (this.isChangingIP || timeSinceLastChange < this.changeIPDebounceTime) {
+      console.log("Background: Preventing duplicate changeIP call");
+      return;
+    }
+
+    // Mark as changing IP
+    this.isChangingIP = true;
+    this.lastChangeTime = now;
 
     try {
       console.log("Background: Starting auto change IP");
@@ -533,11 +566,9 @@ class AutoChangeManager {
         // Notify popup of success
         this.sendToPopup("successGetProxyInfo", result.data);
 
-        // Continue the cycle with proper interval reset
+        // Continue the cycle
         if (this.isRunning) {
           console.log(`Background: Restarting timer for ${this.timeInterval}s`);
-          // Reset to check every second again
-          this.timeInterval = 1;
           this.scheduleNextChange();
         }
       } else {
@@ -559,6 +590,9 @@ class AutoChangeManager {
       if (this.isRunning) {
         this.currentTimer = setTimeout(() => this.scheduleNextChange(), 30000);
       }
+    } finally {
+      // FIXED: Always clear the changing flag
+      this.isChangingIP = false;
     }
   }
 
@@ -585,29 +619,50 @@ class AutoChangeManager {
     }
   }
 
-  // Sync with popup timer when popup opens
+  // FIXED: Sync with popup timer with better coordination
   async syncWithPopup() {
     const remaining = await this.getRemainingTime();
     
     if (remaining > 0) {
-      // Update interval to remaining time
-      this.timeInterval = remaining;
-      
-      // Clear current timer and restart with correct time
+      // FIXED: Temporarily pause background timer when popup is active
       if (this.currentTimer) {
         clearTimeout(this.currentTimer);
         this.currentTimer = null;
       }
       
-      console.log(`Background: Syncing with popup, ${remaining}s remaining`);
-      this.scheduleNextChange();
+      console.log(`Background: Pausing for popup sync, ${remaining}s remaining`);
+      
+      // Mark popup as taking control
+      await browserAPI.storage.local.set({
+        backgroundManagerActive: false,
+        popupTakingControl: true
+      });
     }
     
     return remaining;
   }
 
-  stop() {
+  // FIXED: Resume background timer when popup closes
+  async resumeFromPopup() {
+    const remaining = await this.getRemainingTime();
+    
+    if (remaining > 0 && this.isRunning) {
+      console.log(`Background: Resuming timer, ${remaining}s remaining`);
+      
+      // Mark background as active again
+      await browserAPI.storage.local.set({
+        backgroundManagerActive: true,
+        popupTakingControl: false
+      });
+      
+      this.scheduleNextChange();
+    }
+  }
+
+  // FIXED: Improved stop method
+  async stop() {
     this.isRunning = false;
+    this.isChangingIP = false;
 
     if (this.currentTimer) {
       clearTimeout(this.currentTimer);
@@ -615,11 +670,13 @@ class AutoChangeManager {
     }
 
     // Clear storage
-    browserAPI.storage.local.remove([
+    await browserAPI.storage.local.remove([
       'backgroundTimerConfig',
       'backgroundTimerStartTime', 
       'backgroundTimerDuration',
-      'backgroundTimerActive'
+      'backgroundTimerActive',
+      'backgroundManagerActive',
+      'popupTakingControl'
     ]);
 
     this.config = null;
@@ -644,8 +701,10 @@ class AutoChangeManager {
       isRunning: this.isRunning,
       timeInterval: this.timeInterval,
       hasConfig: !!this.config,
+      isChangingIP: this.isChangingIP,
+      lastChangeTime: this.lastChangeTime,
       nextChangeTime: this.currentTimer ? Date.now() + this.timeInterval * 1000 : null,
-      mode: "background_popup_sync",
+      mode: "background_popup_sync_v2",
     };
   }
 }
@@ -662,91 +721,127 @@ class MessageHandler {
   }
 
   async handleMessage(request, sender, sendResponse) {
-  try {
-    switch (request.greeting) {
-      case "ping":
-        sendResponse({ pong: true });
-        break;
+    try {
+      switch (request.greeting) {
+        case "ping":
+          sendResponse({ pong: true });
+          break;
 
-      // FIXED: Add handler for background timer status
-      case "getBackgroundTimerStatus":
-        const remainingTime = await autoChangeManager.getRemainingTime();
-        sendResponse({ 
-          remainingTime: remainingTime,
-          isActive: autoChangeManager.isRunning,
-          config: autoChangeManager.config
-        });
-        
-        // Sync background timer with popup opening
-        if (remainingTime > 0) {
-          await autoChangeManager.syncWithPopup();
-        }
-        break;
-
-      // FIXED: Handle immediate popup timer expiration
-      case "popupTimerExpired":
-        console.log("Received popup timer expired notification");
-        if (autoChangeManager.isRunning) {
-          // Clear current timer and execute change immediately
-          if (autoChangeManager.currentTimer) {
-            clearTimeout(autoChangeManager.currentTimer);
-            autoChangeManager.currentTimer = null;
+        // FIXED: Improved background timer status with coordination
+        case "getBackgroundTimerStatus":
+          const remainingTime = await autoChangeManager.getRemainingTime();
+          const status = autoChangeManager.getStatus();
+          
+          sendResponse({ 
+            remainingTime: remainingTime,
+            isActive: autoChangeManager.isRunning,
+            isChangingIP: autoChangeManager.isChangingIP,
+            config: autoChangeManager.config,
+            status: status
+          });
+          
+          // FIXED: Sync and pause background when popup opens
+          if (remainingTime > 0) {
+            await autoChangeManager.syncWithPopup();
           }
-          // Execute auto change immediately
-          await autoChangeManager.handleAutoChange();
-        }
-        sendResponse({ received: true });
-        break;
+          break;
 
-      case CONFIG.MESSAGES.GET_LOCATIONS_DATA:
-        const locations = await this.getLocations();
-        if (locations) sendResponse({ data: locations });
-        break;
+        // FIXED: Handle popup timer expiration with debouncing
+        case "popupTimerExpired":
+          console.log("Received popup timer expired notification");
+          
+          const now = Date.now();
+          const timeSinceLastChange = now - autoChangeManager.lastChangeTime;
+          
+          // Debounce rapid calls
+          if (autoChangeManager.isChangingIP || timeSinceLastChange < autoChangeManager.changeIPDebounceTime) {
+            console.log("Background: Debouncing popup timer expired");
+            sendResponse({ received: true, debounced: true });
+            break;
+          }
+          
+          if (autoChangeManager.isRunning) {
+            // Resume background control and execute change
+            await browserAPI.storage.local.set({
+              backgroundManagerActive: true,
+              popupTakingControl: false
+            });
+            
+            // Clear current timer and execute change immediately
+            if (autoChangeManager.currentTimer) {
+              clearTimeout(autoChangeManager.currentTimer);
+              autoChangeManager.currentTimer = null;
+            }
+            
+            await autoChangeManager.handleAutoChange();
+          }
+          sendResponse({ received: true });
+          break;
 
-      case CONFIG.MESSAGES.CHECK_VERSION:
-        this.checkVersion();
-        await proxyManager.setDirectProxy();
-        break;
+        // FIXED: Handle popup closing
+        case "popupClosed":
+          console.log("Popup closed, resuming background timer");
+          await autoChangeManager.resumeFromPopup();
+          sendResponse({ resumed: true });
+          break;
 
-      case CONFIG.MESSAGES.GET_INFO_KEY:
-        await this.getInfoKey(request.data);
-        break;
+        case CONFIG.MESSAGES.GET_LOCATIONS_DATA:
+          const locations = await this.getLocations();
+          if (locations) sendResponse({ data: locations });
+          break;
 
-      case CONFIG.MESSAGES.GET_CURRENT_PROXY:
-        autoChangeManager.stop();
-        await proxyManager.setDirectProxy();
-        await this.getCurrentProxy(request.data.apiKey, request.data.proxyType);
-        break;
+        case CONFIG.MESSAGES.CHECK_VERSION:
+          this.checkVersion();
+          await proxyManager.setDirectProxy();
+          break;
 
-      case CONFIG.MESSAGES.CANCEL_ALL:
-        this.deleteAlarm("flagLoop");
-        this.deleteAlarm("refreshPage");
-        autoChangeManager.stop();
-        await this.disconnectProxy(request.data.apiKey, request.data.whitelist_ip);
-        await proxyManager.setDirectProxy();
-        break;
+        case CONFIG.MESSAGES.GET_INFO_KEY:
+          await this.getInfoKey(request.data);
+          break;
 
-      case CONFIG.MESSAGES.CHANGE_IP:
-        autoChangeManager.stop();
-        await proxyManager.setDirectProxy();
-        await this.changeIP(request.data.apiKey, request.data.location, request.data.proxyType);
-        break;
+        case CONFIG.MESSAGES.GET_CURRENT_PROXY:
+          // FIXED: Stop background timer to prevent conflict
+          autoChangeManager.stop();
+          await proxyManager.setDirectProxy();
+          await this.getCurrentProxy(request.data.apiKey, request.data.proxyType);
+          break;
 
-      case CONFIG.MESSAGES.AUTO_CHANGE_IP:
-        // Stop any existing timer
-        autoChangeManager.stop();
-        await proxyManager.setDirectProxy();
+        case CONFIG.MESSAGES.CANCEL_ALL:
+          this.deleteAlarm("flagLoop");
+          this.deleteAlarm("refreshPage");
+          autoChangeManager.stop();
+          await this.disconnectProxy(request.data.apiKey, request.data.whitelist_ip);
+          await proxyManager.setDirectProxy();
+          break;
 
-        // Start both immediate change and background manager
-        await this.changeIP(request.data.apiKey, request.data.location, request.data.proxyType);
-        await autoChangeManager.start(request.data);
-        break;
+        case CONFIG.MESSAGES.CHANGE_IP:
+          autoChangeManager.stop();
+          await proxyManager.setDirectProxy();
+          await this.changeIP(request.data.apiKey, request.data.location, request.data.proxyType);
+          break;
+
+        case CONFIG.MESSAGES.AUTO_CHANGE_IP:
+          // FIXED: Stop any existing timer and wait a bit
+          await autoChangeManager.stop();
+          await this.sleep(500); // Small delay to ensure cleanup
+          await proxyManager.setDirectProxy();
+
+          // Start immediate change and background manager
+          await this.changeIP(request.data.apiKey, request.data.location, request.data.proxyType);
+          await autoChangeManager.start(request.data);
+          break;
+      }
+    } catch (error) {
+      console.error("Error handling message:", error);
     }
-  } catch (error) {
-    console.error("Error handling message:", error);
   }
-}
 
+  // Helper sleep method
+  sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // ... rest of methods remain the same
   async getLocations() {
     const result = await APIService.getLocations();
     if (result?.code === 200) {
