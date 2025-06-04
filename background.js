@@ -1,20 +1,7 @@
-// Browser compatibility
 const browserAPI = typeof browser !== "undefined" ? browser : chrome;
-
-// Fix for Manifest V3 API differences
 if (browserAPI.browserAction && !browserAPI.action) {
   browserAPI.action = browserAPI.browserAction;
 }
-
-/**
- * FIXED BACKGROUND SCRIPT - ENABLE AUTO CHANGE TIMER FOR POPUP CLOSED SCENARIOS
- *
- * NEW HYBRID APPROACH:
- * - Popup timer: Primary display and control when popup is open
- * - Background timer: Backup system when popup is closed
- * - Smart coordination: Avoid duplicate API calls
- * - Real-time sync: Both systems stay in sync
- */
 
 // Constants
 const CONFIG = {
@@ -47,9 +34,6 @@ const CONFIG = {
   },
 };
 
-/**
- * Authentication Module - Handles proxy authentication
- */
 class AuthenticationManager {
   constructor() {
     this.credentials = [];
@@ -108,9 +92,6 @@ class AuthenticationManager {
   }
 }
 
-/**
- * Proxy Request Manager - Handles proxy requests
- */
 class ProxyRequestManager {
   constructor() {
     this.mode = "";
@@ -234,9 +215,6 @@ class ProxyRequestManager {
   }
 }
 
-/**
- * API Service - Handles API calls
- */
 class APIService {
   static async makeRequest(url, headers = {}) {
     try {
@@ -284,9 +262,6 @@ class APIService {
   }
 }
 
-/**
- * Browser Proxy Manager - Handles browser-specific proxy settings
- */
 class BrowserProxyManager {
   static async setBrowserProxy(proxyInfo) {
     const config = {
@@ -382,16 +357,18 @@ class AutoChangeManager {
     this.lastChangeTime = 0;
     this.changeDebounce = 3000; // 3 second debounce
     this.startTime = 0;
-    this.lastUpdateTime = 0; // FIXED: Track last update time
+    this.lastUpdateTime = 0;
   }
 
   async start(config) {
-    console.log("AutoChangeManager: Starting with config", config);
-    
     // Stop any existing timer
     await this.stop();
 
-    if (!config.isAutoChangeIP || !config.timeAutoChangeIP || config.timeAutoChangeIP <= 0) {
+    if (
+      !config.isAutoChangeIP ||
+      !config.timeAutoChangeIP ||
+      config.timeAutoChangeIP <= 0
+    ) {
       console.log("AutoChangeManager: Invalid config, not starting");
       return;
     }
@@ -401,9 +378,8 @@ class AutoChangeManager {
     this.remainingTime = this.originalDuration;
     this.isRunning = true;
     this.startTime = Date.now();
-    this.lastUpdateTime = Date.now(); // FIXED: Initialize last update time
+    this.lastUpdateTime = Date.now();
 
-    // Save state immediately
     await this.saveState();
 
     console.log(`AutoChangeManager: Started with ${this.remainingTime}s`);
@@ -418,7 +394,7 @@ class AutoChangeManager {
 
       this.remainingTime--;
       this.lastUpdateTime = Date.now(); // FIXED: Update last update time
-      
+
       console.log(`AutoChangeManager: ${this.remainingTime}s remaining`);
 
       // Save current state every update
@@ -451,7 +427,7 @@ class AutoChangeManager {
 
     try {
       console.log("AutoChangeManager: Starting IP change process");
-      
+
       // Notify popup
       this.sendToPopup("showProcessingNewIpConnect", {});
 
@@ -460,33 +436,45 @@ class AutoChangeManager {
       await this.sleep(1000);
 
       // Call change IP API
-      const result = await APIService.changeIP(this.config.apiKey, this.config.location);
+      const result = await APIService.changeIP(
+        this.config.apiKey,
+        this.config.location
+      );
 
       if (result && result.code === 200) {
         console.log("AutoChangeManager: IP change successful");
-        
+
         // Set new proxy
-        await proxyManager.handleProxyResponse(result.data, this.config.apiKey, this.config.proxyType);
-        
+        await proxyManager.handleProxyResponse(
+          result.data,
+          this.config.apiKey,
+          this.config.proxyType
+        );
+
         // FIXED: Reset timer for next cycle with proper state management
         this.remainingTime = this.originalDuration;
         this.startTime = Date.now();
         this.lastUpdateTime = Date.now();
         await this.saveState();
-        
+
         // Notify popup of success
         this.sendToPopup("successGetProxyInfo", result.data);
-        
+
         // Continue the cycle
         if (this.isRunning) {
-          console.log(`AutoChangeManager: Restarting cycle with ${this.remainingTime}s`);
+          console.log(
+            `AutoChangeManager: Restarting cycle with ${this.remainingTime}s`
+          );
           this.scheduleTimer();
         }
       } else {
         console.error("AutoChangeManager: IP change failed", result);
-        const error = result?.code === 500 ? "Kết Nối Thất Bại" : (result?.message || "Lỗi không xác định");
+        const error =
+          result?.code === 500
+            ? "Kết Nối Thất Bại"
+            : result?.message || "Lỗi không xác định";
         this.sendToPopup("failureGetProxyInfo", { error });
-        
+
         // Retry after 30 seconds on error
         if (this.isRunning) {
           this.remainingTime = 30;
@@ -496,8 +484,11 @@ class AutoChangeManager {
         }
       }
     } catch (error) {
-      console.error("AutoChangeManager: Unexpected error during IP change", error);
-      
+      console.error(
+        "AutoChangeManager: Unexpected error during IP change",
+        error
+      );
+
       // Retry after 30 seconds on error
       if (this.isRunning) {
         this.remainingTime = 30;
@@ -510,7 +501,6 @@ class AutoChangeManager {
     }
   }
 
-  // FIXED: Enhanced state saving with better tracking
   async saveState() {
     try {
       const state = {
@@ -521,54 +511,61 @@ class AutoChangeManager {
         startTime: this.startTime,
         lastUpdateTime: this.lastUpdateTime,
         isChangingIP: this.isChangingIP,
-        version: Date.now() // Version for conflict resolution
+        version: Date.now(),
       };
 
       await browserAPI.storage.local.set({
-        autoChangeState: state
+        autoChangeState: state,
       });
-
-      console.log("AutoChangeManager: State saved", state);
     } catch (error) {
       console.error("AutoChangeManager: Error saving state", error);
     }
   }
 
-  // FIXED: Enhanced state loading with time synchronization
   async loadState() {
     try {
-      const result = await browserAPI.storage.local.get(['autoChangeState']);
+      const result = await browserAPI.storage.local.get(["autoChangeState"]);
       const state = result.autoChangeState;
-      
+
       if (state && state.isRunning) {
-        console.log("AutoChangeManager: Loading previous state", state);
-        
         const now = Date.now();
-        const timeSinceLastUpdate = Math.floor((now - state.lastUpdateTime) / 1000);
-        
+        const timeSinceLastUpdate = Math.floor(
+          (now - state.lastUpdateTime) / 1000
+        );
+
         // FIXED: More robust time calculation
-        if (timeSinceLastUpdate < 600) { // 10 minutes threshold
+        if (timeSinceLastUpdate < 600) {
+          // 10 minutes threshold
           this.isRunning = state.isRunning;
           this.originalDuration = state.originalDuration;
           this.config = state.config;
           this.startTime = state.startTime;
           this.isChangingIP = state.isChangingIP || false;
-          
+
           // FIXED: Calculate remaining time based on elapsed time
-          this.remainingTime = Math.max(0, state.remainingTime - timeSinceLastUpdate);
+          this.remainingTime = Math.max(
+            0,
+            state.remainingTime - timeSinceLastUpdate
+          );
           this.lastUpdateTime = now;
-          
-          console.log(`AutoChangeManager: Calculated remaining time: ${this.remainingTime}s (elapsed: ${timeSinceLastUpdate}s)`);
-          
+
+          console.log(
+            `AutoChangeManager: Calculated remaining time: ${this.remainingTime}s (elapsed: ${timeSinceLastUpdate}s)`
+          );
+
           // Save updated state
           await this.saveState();
-          
+
           if (this.remainingTime > 0) {
-            console.log(`AutoChangeManager: Resuming with ${this.remainingTime}s remaining`);
+            console.log(
+              `AutoChangeManager: Resuming with ${this.remainingTime}s remaining`
+            );
             this.scheduleTimer();
             return true;
           } else if (!this.isChangingIP) {
-            console.log("AutoChangeManager: Timer expired while background was inactive");
+            console.log(
+              "AutoChangeManager: Timer expired while background was inactive"
+            );
             await this.executeAutoChange();
             return true;
           }
@@ -580,11 +577,10 @@ class AutoChangeManager {
     } catch (error) {
       console.error("AutoChangeManager: Error loading state", error);
     }
-    
+
     return false;
   }
 
-  // FIXED: Enhanced status with better synchronization data
   getStatus() {
     return {
       isActive: this.isRunning,
@@ -595,14 +591,13 @@ class AutoChangeManager {
       lastChangeTime: this.lastChangeTime,
       startTime: this.startTime,
       lastUpdateTime: this.lastUpdateTime,
-      currentTime: Date.now() // Current time for sync calculation
+      currentTime: Date.now(), 
     };
   }
 
-  // FIXED: Clear state method
   async clearState() {
     try {
-      await browserAPI.storage.local.remove(['autoChangeState']);
+      await browserAPI.storage.local.remove(["autoChangeState"]);
       console.log("AutoChangeManager: State cleared");
     } catch (error) {
       console.error("AutoChangeManager: Error clearing state", error);
@@ -611,9 +606,9 @@ class AutoChangeManager {
 
   async stop() {
     console.log("AutoChangeManager: Stopping");
-    
+
     this.isRunning = false;
-    
+
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -630,7 +625,7 @@ class AutoChangeManager {
   }
 
   sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   sendToPopup(message, data = null) {
@@ -642,16 +637,11 @@ class AutoChangeManager {
   }
 }
 
-/**
- * FIXED Message Handler - Better timer coordination
- */
 class MessageHandler {
   sendToPopup(message, data = null) {
     try {
       browserAPI.runtime.sendMessage({ greeting: message, data });
-    } catch (error) {
-      // Popup might be closed, ignore error
-    }
+    } catch (error) {}
   }
 
   async handleMessage(request, sender, sendResponse) {
@@ -663,7 +653,6 @@ class MessageHandler {
 
         case "getBackgroundTimerStatus":
           const status = autoChangeManager.getStatus();
-          console.log("Background: Sending timer status", status);
           sendResponse(status);
           break;
 
@@ -682,39 +671,42 @@ class MessageHandler {
           break;
 
         case CONFIG.MESSAGES.GET_CURRENT_PROXY:
-          // FIXED: KHÔNG stop background timer - chỉ get proxy info
-          console.log("Background: GET_CURRENT_PROXY request - keeping timer running");
-          await this.getCurrentProxy(request.data.apiKey, request.data.proxyType);
+          await this.getCurrentProxy(
+            request.data.apiKey,
+            request.data.proxyType
+          );
           break;
 
         case CONFIG.MESSAGES.CANCEL_ALL:
           this.deleteAlarm("flagLoop");
           this.deleteAlarm("refreshPage");
           autoChangeManager.stop();
-          await this.disconnectProxy(request.data.apiKey, request.data.whitelist_ip);
+          await this.disconnectProxy(
+            request.data.apiKey,
+            request.data.whitelist_ip
+          );
           await proxyManager.setDirectProxy();
           break;
 
         case CONFIG.MESSAGES.CHANGE_IP:
           autoChangeManager.stop();
           await proxyManager.setDirectProxy();
-          await this.changeIP(request.data.apiKey, request.data.location, request.data.proxyType);
+          await this.changeIP(
+            request.data.apiKey,
+            request.data.location,
+            request.data.proxyType
+          );
           break;
 
         case CONFIG.MESSAGES.AUTO_CHANGE_IP:
-          console.log("Background: Received AUTO_CHANGE_IP request", request.data);
-          
-          // Stop any existing timer
           await autoChangeManager.stop();
           await this.sleep(500);
-          
-          // Disconnect current proxy
           await proxyManager.setDirectProxy();
-          
-          // Execute immediate IP change
-          await this.changeIP(request.data.apiKey, request.data.location, request.data.proxyType);
-          
-          // Start auto change manager
+          await this.changeIP(
+            request.data.apiKey,
+            request.data.location,
+            request.data.proxyType
+          );
           await autoChangeManager.start(request.data);
           break;
       }
@@ -724,7 +716,7 @@ class MessageHandler {
   }
 
   sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   async getLocations() {
@@ -745,7 +737,10 @@ class MessageHandler {
       this.sendToPopup("successGetInfoKey", result);
       return result.data;
     }
-    const error = result?.status === 500 ? CONFIG.ERRORS.CONNECTION_FAILED : (result?.message || CONFIG.ERRORS.UNKNOWN_ERROR);
+    const error =
+      result?.status === 500
+        ? CONFIG.ERRORS.CONNECTION_FAILED
+        : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
     this.sendToPopup("failureGetProxyInfo", { error });
   }
 
@@ -756,7 +751,10 @@ class MessageHandler {
     if (result?.code === 200) {
       await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
     } else {
-      const error = result?.status === 500 ? CONFIG.ERRORS.CONNECTION_FAILED : (result?.message || CONFIG.ERRORS.UNKNOWN_ERROR);
+      const error =
+        result?.status === 500
+          ? CONFIG.ERRORS.CONNECTION_FAILED
+          : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
       this.sendToPopup("failureGetProxyInfo", { error });
     }
   }
@@ -768,7 +766,10 @@ class MessageHandler {
     if (result?.code === 200) {
       await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
     } else {
-      const error = result?.code === 500 ? CONFIG.ERRORS.CONNECTION_FAILED : (result?.message || CONFIG.ERRORS.UNKNOWN_ERROR);
+      const error =
+        result?.code === 500
+          ? CONFIG.ERRORS.CONNECTION_FAILED
+          : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
       this.sendToPopup("failureGetProxyInfo", { error });
     }
   }
@@ -932,14 +933,13 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
   return true; // Keep channel open for async responses
 });
 
-
 // Initialize extension
 const initializeExtension = async () => {
   console.log("Background: Initializing extension");
-  
+
   await proxyRequestManager.loadSettings();
   proxyRequestManager.initializeListener();
-  
+
   // Try to restore auto change manager state
   const restored = await autoChangeManager.loadState();
   if (restored) {
