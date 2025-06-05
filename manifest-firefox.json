@@ -3,7 +3,7 @@
   "name": "VNProxy Switcher",
   "description": "VNProxy Switcher - Tiện ích fake IP, đổi proxy nhanh chóng chỉ với một cú nhấp chuột!",
   "version": "1.0.0",
-  
+
   "browser_action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
@@ -11,13 +11,13 @@
       "48": "images/logo-favicon-48.png"
     }
   },
-  
+
   "icons": {
     "16": "images/logo-favicon-16.png",
     "48": "images/logo-favicon-48.png",
     "128": "images/logo-favicon-128.png"
   },
-  
+
   "background": {
     "scripts": ["background.js"],
     "persistent": true
@@ -32,14 +32,12 @@
     "<all_urls>",
     "alarms",
     "downloads",
-    "notifications"
-  ],
-
-  "optional_permissions": [
-    "browsingData", 
+    "notifications",
     "privacy"
   ],
-  
+
+  "optional_permissions": ["browsingData"],
+
   "browser_specific_settings": {
     "gecko": {
       "id": "vnproxy@eric.h.jung",

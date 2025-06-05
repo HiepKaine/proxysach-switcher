@@ -29,6 +29,7 @@ const POPUP_CONFIG = {
     CHANGE_IP: "changeIp",
     AUTO_CHANGE_IP: "autoChangeIp",
     CANCEL_ALL: "cancelALL",
+    FORCE_DISCONNECT: "forceDisconnect",
   },
   UI_ELEMENTS: {
     LOCATION_SELECT: "location_select",
@@ -68,6 +69,11 @@ const POPUP_CONFIG = {
     LOADING_PROXY_INFO: "• Đang tải thông tin...",
   },
 };
+
+// Browser detection
+const IS_FIREFOX =
+  typeof browser !== "undefined" || navigator.userAgent.includes("Firefox");
+const IS_CHROME = !IS_FIREFOX;
 
 class StorageManager {
   static set(key, value) {
@@ -124,8 +130,53 @@ class ChromeStorageManager {
 class MessageHandler {
   static async sendToBackground(message, data = {}) {
     try {
-      return await browserAPI.runtime.sendMessage({ greeting: message, data });
+      // Messages that don't need response
+      const oneWayMessages = [
+        POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+        POPUP_CONFIG.BACKGROUND_MESSAGES.FORCE_DISCONNECT,
+        POPUP_CONFIG.BACKGROUND_MESSAGES.CHANGE_IP,
+        POPUP_CONFIG.BACKGROUND_MESSAGES.AUTO_CHANGE_IP,
+      ];
+
+      if (oneWayMessages.includes(message)) {
+        // Send message without expecting response
+        try {
+          browserAPI.runtime.sendMessage({ greeting: message, data });
+        } catch (error) {}
+        return null;
+      } else {
+        // Send message and wait for response with timeout
+        return await Promise.race([
+          browserAPI.runtime.sendMessage({ greeting: message, data }),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Message timeout")), 5000)
+          ),
+        ]);
+      }
     } catch (error) {
+      console.error("Popup: Error sending message to background:", error);
+
+      // Handle specific error types
+      if (error.message.includes("Receiving end does not exist")) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+
+        // Retry once
+        try {
+          if (oneWayMessages.includes(message)) {
+            browserAPI.runtime.sendMessage({ greeting: message, data });
+            return null;
+          } else {
+            return await browserAPI.runtime.sendMessage({
+              greeting: message,
+              data,
+            });
+          }
+        } catch (retryError) {
+          console.error("Popup: Retry also failed:", retryError);
+          return null;
+        }
+      }
+
       return null;
     }
   }
@@ -158,6 +209,23 @@ class MessageHandler {
       }
     });
   }
+
+  // FIXED: Add method to check background connection
+  static async checkBackgroundConnection() {
+    try {
+      const response = await Promise.race([
+        browserAPI.runtime.sendMessage({ greeting: "ping", data: {} }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Ping timeout")), 2000)
+        ),
+      ]);
+
+      return response && response.pong;
+    } catch (error) {
+      console.error("Popup: Background connection check failed:", error);
+      return false;
+    }
+  }
 }
 
 class TimerManager {
@@ -176,6 +244,7 @@ class TimerManager {
     this.isInitialized = false;
   }
 
+  // ... [Keep all existing TimerManager methods unchanged] ...
   async syncWithBackground() {
     try {
       const response = await browserAPI.runtime.sendMessage({
@@ -197,11 +266,6 @@ class TimerManager {
           0,
           response.remainingTime - timeSinceLastUpdate
         );
-        console.log(
-          "🚀 ~ TimerManager ~ syncWithBackground ~ realRemainingTime:",
-          realRemainingTime
-        );
-
         return {
           status: "success",
           remainingTime: realRemainingTime,
@@ -371,9 +435,7 @@ class TimerManager {
             }
           }
         }
-      } catch (error) {
-        console.log("Sync check failed, will retry...");
-      }
+      } catch (error) {}
     }, 500);
   }
 
@@ -614,7 +676,7 @@ class LocationManager {
             {
               apiKey: apiKey,
               proxyType: proxyType,
-              preserveTimer: preserveTimer, // ✅ FIX: Thêm flag
+              preserveTimer: preserveTimer,
             }
           );
         } catch (error) {
@@ -664,8 +726,6 @@ class UIManager {
   }
 
   static showProxyInfo(proxyInfo, isStart = false, preserveTimer = false) {
-    console.log("Showing proxy info:", proxyInfo, isStart, preserveTimer);
-
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.PUBLIC_IPV4).innerText =
       proxyInfo.public_ipv4;
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.PUBLIC_IPV6).innerText =
@@ -993,27 +1053,69 @@ class ProxyManager {
     }
   }
 
+  // FIXED: Enhanced disconnect method for Firefox support
   static async disconnect() {
-    const proxyInfo = await ChromeStorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.TX_PROXY
-    );
-    const config = {
-      apiKey: proxyInfo?.apiKey || "",
-      isAutoChangeIP: false,
-      timeAutoChangeIP: document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-      ).value,
-    };
+    try {
+      const proxyInfo = await ChromeStorageManager.get(
+        POPUP_CONFIG.STORAGE_KEYS.TX_PROXY
+      );
 
-    await ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_CONF, config);
+      const config = {
+        apiKey: proxyInfo?.apiKey || "",
+        isAutoChangeIP: false,
+        timeAutoChangeIP:
+          document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP)
+            ?.value || "0",
+        browser: IS_FIREFOX ? "firefox" : "chrome", // Add browser info
+      };
 
-    UIManager.clearPopupPage();
-    this.directProxy();
+      await ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_CONF, config);
 
-    await MessageHandler.sendToBackground(
-      POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
-      config
-    );
+      // Clear popup UI first
+      UIManager.clearPopupPage();
+      this.directProxy();
+
+      // Send different messages based on browser
+      if (IS_FIREFOX) {
+        // For Firefox, send force disconnect message first (no response expected)
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.FORCE_DISCONNECT,
+          config
+        );
+
+        // Small delay to ensure background processes the force disconnect
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        // Then send cancel all (no response expected)
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+          config
+        );
+      } else {
+        // For Chrome, use standard cancel all (no response expected)
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+          config
+        );
+      }
+
+      // Additional Firefox-specific cleanup
+      if (IS_FIREFOX) {
+        // Clear any Firefox-specific storage
+        try {
+          await browserAPI.storage.local.remove(["firefoxProxyActive"]);
+        } catch (e) {}
+
+        // Wait a bit longer for Firefox to process
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    } catch (error) {
+      console.error("Popup: Error during disconnect:", error);
+
+      // Fallback: ensure UI is cleared even if background communication fails
+      UIManager.clearPopupPage();
+      this.directProxy();
+    }
   }
 }
 
@@ -1031,7 +1133,18 @@ class EventManager {
     document
       .getElementById(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT)
       .addEventListener("click", async () => {
-        await ProxyManager.disconnect();
+        UIManager.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT);
+
+        try {
+          await ProxyManager.disconnect();
+        } catch (error) {
+          console.error("Popup: Disconnect error:", error);
+        } finally {
+          // Ensure button is re-enabled if needed
+          setTimeout(() => {
+            UIManager.enableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
+          }, 1000);
+        }
       });
   }
 }
@@ -1047,6 +1160,26 @@ class AppInitializer {
       timerManager.forceStopAll();
 
       UIManager.setNotConnectedStatus();
+      const isBackgroundConnected =
+        await MessageHandler.checkBackgroundConnection();
+
+      if (!isBackgroundConnected) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        const retryConnection =
+          await MessageHandler.checkBackgroundConnection();
+        if (!retryConnection) {
+          const statusElement = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+          );
+          if (statusElement) {
+            statusElement.innerText =
+              "• Extension lỗi kết nối, vui lòng thử lại";
+            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+          }
+          return;
+        }
+      }
 
       await MessageHandler.sendToBackground(
         POPUP_CONFIG.BACKGROUND_MESSAGES.GET_LOCATIONS_DATA
@@ -1057,7 +1190,6 @@ class AppInitializer {
         FormManager.loadStoredSettings();
       }
 
-      // Step 4: Wait for locations to load
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       const proxyConnected = StorageManager.get(
@@ -1080,7 +1212,13 @@ class AppInitializer {
         await LocationManager.getProxyInfoIfConnected(timerInitialized);
       }
     } catch (error) {
-      console.error("App initialization error:", error);
+      const statusElement = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+      );
+      if (statusElement) {
+        statusElement.innerText = "• Initialization Error";
+        statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+      }
     } finally {
       this.isInitializing = false;
     }
