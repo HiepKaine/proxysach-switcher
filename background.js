@@ -119,11 +119,75 @@ class ProxyRequestManager {
     if (IS_FIREFOX) {
       this.isFirefoxProxyActive = true;
       await this.saveFirefoxProxyState(true);
-      console.log("Background: Firefox proxy state set to active");
     }
 
     // Always ensure listener is active
     this.initializeListener();
+  }
+
+  async loadFirefoxProxyState() {
+    if (!IS_FIREFOX) return false;
+
+    try {
+      const result = await browserAPI.storage.local.get([
+        CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE,
+      ]);
+      const state = result[CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE] || false;
+      return state;
+    } catch (error) {
+      console.error(
+        "ProxyRequestManager: Error loading Firefox proxy state:",
+        error
+      );
+      return false;
+    }
+  }
+  async forceClearFirefoxProxy() {
+    if (IS_FIREFOX) {
+      try {
+        // Set state to false
+        this.isFirefoxProxyActive = false;
+        await this.saveFirefoxProxyState(false);
+
+        // Clear all proxy-related data
+        this.mode = "";
+        this.proxy = {};
+        this.isInitialized = false;
+
+        // Clear storage
+        try {
+          await browserAPI.storage.local.remove([
+            CONFIG.STORAGE_KEYS.PROXY_MODE,
+            CONFIG.STORAGE_KEYS.PROXY_DATA,
+            CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE,
+          ]);
+        } catch (storageError) {
+          console.error(
+            "ProxyRequestManager: Error clearing Firefox storage:",
+            storageError
+          );
+        }
+
+        // Force set state again to ensure it's saved
+        await this.saveFirefoxProxyState(false);
+
+        // Verify the state was actually cleared
+        const verifyState = await this.loadFirefoxProxyState();
+        if (verifyState) {
+          console.warn(
+            "ProxyRequestManager: Firefox proxy state not properly cleared, retrying..."
+          );
+          await browserAPI.storage.local.set({
+            [CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE]: false,
+          });
+        }
+      } catch (error) {
+        console.error(
+          "ProxyRequestManager: Error in forceClearFirefoxProxy:",
+          error
+        );
+      }
+    }
   }
 
   updateSettings(preferences) {
@@ -171,7 +235,6 @@ class ProxyRequestManager {
       urls: ["<all_urls>"],
     });
     this.isListenerAdded = true;
-    console.log("Background: Proxy onRequest listener initialized");
   }
 
   async loadSettings() {
@@ -194,10 +257,6 @@ class ProxyRequestManager {
         if (IS_FIREFOX) {
           this.isFirefoxProxyActive =
             result[CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE] || false;
-          console.log(
-            "Background: Firefox proxy state loaded:",
-            this.isFirefoxProxyActive
-          );
         }
       }
     } catch (error) {
@@ -224,13 +283,11 @@ class ProxyRequestManager {
 
     // For Firefox, check if proxy should be active
     if (IS_FIREFOX && !this.isFirefoxProxyActive) {
-      console.log("Background: Firefox proxy inactive, returning direct");
       return { type: "direct" };
     }
 
     const result = this.processProxy(this.proxy);
     if (IS_FIREFOX && result.type !== "direct") {
-      console.log("Background: Firefox proxy active, returning:", result);
     }
     return result;
   }
@@ -262,8 +319,6 @@ class ProxyRequestManager {
   }
 
   async clearProxy() {
-    console.log("Background: Clearing proxy settings");
-
     this.mode = "";
     this.proxy = {};
     this.isInitialized = false;
@@ -272,7 +327,6 @@ class ProxyRequestManager {
     if (IS_FIREFOX) {
       this.isFirefoxProxyActive = false;
       await this.saveFirefoxProxyState(false);
-      console.log("Background: Firefox proxy state cleared");
     }
 
     await browserAPI.storage.local.remove([
@@ -284,8 +338,6 @@ class ProxyRequestManager {
   // NEW: Force refresh Firefox proxy state
   async forceRefreshFirefoxState() {
     if (IS_FIREFOX) {
-      console.log("Background: Force refreshing Firefox proxy state");
-
       // Reload current settings
       await this.loadSettings();
 
@@ -293,19 +345,15 @@ class ProxyRequestManager {
       if (this.mode && this.proxy && this.proxy.hostname) {
         this.isFirefoxProxyActive = true;
         await this.saveFirefoxProxyState(true);
-        console.log("Background: Firefox proxy state refreshed to active");
       } else {
         this.isFirefoxProxyActive = false;
         await this.saveFirefoxProxyState(false);
-        console.log("Background: Firefox proxy state refreshed to inactive");
       }
     }
   }
 
   // NEW: Force clear method for Firefox
   async forceClearFirefoxProxy() {
-    console.log("Background: Force clearing Firefox proxy");
-
     if (IS_FIREFOX) {
       this.isFirefoxProxyActive = false;
       await this.saveFirefoxProxyState(false);
@@ -314,8 +362,6 @@ class ProxyRequestManager {
       this.mode = "";
       this.proxy = {};
       this.isInitialized = false;
-
-      console.log("Background: Firefox proxy force cleared");
     }
   }
 
@@ -394,13 +440,10 @@ class BrowserProxyManager {
 
     try {
       if (IS_FIREFOX) {
-        console.log("Background: Firefox - Using proxy.onRequest only");
         // Firefox proxy is handled entirely by ProxyRequestManager.process()
       } else {
-        console.log("Background: Chrome - Using proxy.settings API");
         await this.setChromeProxy(config);
       }
-      console.log("Background: Browser proxy configured successfully");
     } catch (error) {
       console.error("Error setting browser proxy:", error);
     }
@@ -415,7 +458,6 @@ class BrowserProxyManager {
         config.value.mode = "fixed_servers";
         config.value.rules = this.getSingleProxyRule(proxy);
         await browserAPI.proxy.settings.set(config);
-        console.log("Background: Chrome proxy configured:", config);
       }
     } catch (error) {
       console.error("Error setting Chrome proxy:", error);
@@ -425,19 +467,11 @@ class BrowserProxyManager {
 
   static async clearBrowserProxy() {
     try {
-      console.log("Background: Clearing browser proxy...");
-
       if (IS_FIREFOX) {
-        console.log(
-          "Background: Firefox proxy cleared via ProxyRequestManager state"
-        );
         // Firefox proxy clearing is handled by ProxyRequestManager.clearProxy()
       } else {
-        console.log("Background: Chrome - Clearing proxy.settings");
         await this.clearChromeProxy();
       }
-
-      console.log("Background: Browser proxy cleared successfully");
     } catch (error) {
       console.error("Error clearing browser proxy:", error);
     }
@@ -447,7 +481,6 @@ class BrowserProxyManager {
     try {
       if (browserAPI.proxy?.settings) {
         await browserAPI.proxy.settings.clear({ scope: "regular" });
-        console.log("Background: Chrome proxy cleared successfully");
       }
     } catch (error) {
       console.error("Error clearing Chrome proxy:", error);
@@ -493,12 +526,18 @@ class AutoChangeManager {
   async start(config) {
     await this.stop();
 
+    // Validate config
+    if (!config || !config.apiKey) {
+      console.error("AutoChangeManager: Invalid config provided");
+      return false;
+    }
+
     if (
       !config.isAutoChangeIP ||
       !config.timeAutoChangeIP ||
       config.timeAutoChangeIP <= 0
     ) {
-      return;
+      return false;
     }
 
     this.config = config;
@@ -510,17 +549,28 @@ class AutoChangeManager {
 
     await this.saveState();
     this.scheduleTimer();
+
+    return true;
   }
 
   scheduleTimer() {
-    if (!this.isRunning) return;
+    if (!this.isRunning || !this.config) {
+      return;
+    }
 
     this.timer = setTimeout(async () => {
-      if (!this.isRunning) return;
+      if (!this.isRunning || !this.config) {
+        this.stop();
+        return;
+      }
 
       this.remainingTime--;
       this.lastUpdateTime = Date.now();
       await this.saveState();
+
+      // Log every 10 seconds or when less than 10 seconds remain
+      if (this.remainingTime % 10 === 0 || this.remainingTime <= 10) {
+      }
 
       if (this.remainingTime <= 0) {
         await this.executeAutoChange();
@@ -531,6 +581,13 @@ class AutoChangeManager {
   }
 
   async executeAutoChange() {
+    // Validate config exists
+    if (!this.config || !this.config.apiKey) {
+      console.error("AutoChangeManager: No valid config for auto change");
+      this.stop();
+      return;
+    }
+
     if (this.isChangingIP) return;
 
     const now = Date.now();
@@ -541,8 +598,24 @@ class AutoChangeManager {
 
     try {
       this.sendToPopup("showProcessingNewIpConnect", {});
-      await proxyManager.setDirectProxy();
-      await this.sleep(1000);
+
+      // Use disconnectProxyOnly to preserve auto change config
+      await proxyManager.disconnectProxyOnly();
+
+      // Verify proxy is truly disconnected
+      await this.verifyProxyDisconnected();
+
+      // Longer wait to ensure proxy state is fully cleared
+      const waitTime = IS_FIREFOX ? 3000 : 2000;
+
+      await this.sleep(waitTime);
+
+      // Double check config still exists after wait
+      if (!this.config || !this.config.apiKey) {
+        console.error("AutoChangeManager: Config lost during execution");
+        this.stop();
+        return;
+      }
 
       const result = await APIService.changeIP(
         this.config.apiKey,
@@ -556,6 +629,12 @@ class AutoChangeManager {
           this.config.proxyType
         );
 
+        // Force refresh Firefox state after successful change
+        if (IS_FIREFOX) {
+          await proxyRequestManager.forceRefreshFirefoxState();
+          await this.sleep(500);
+        }
+
         this.remainingTime = this.originalDuration;
         this.startTime = Date.now();
         this.lastUpdateTime = Date.now();
@@ -567,11 +646,16 @@ class AutoChangeManager {
           this.scheduleTimer();
         }
       } else {
+        console.error("AutoChangeManager: API call failed:", result);
         const error =
           result?.code === 500
             ? "Kết Nối Thất Bại"
             : result?.message || "Lỗi không xác định";
+
         this.sendToPopup("failureGetProxyInfo", { error });
+
+        // On failure, ensure we stay in direct proxy mode
+        await proxyManager.disconnectProxyOnly();
 
         if (this.isRunning) {
           this.remainingTime = 30;
@@ -582,14 +666,25 @@ class AutoChangeManager {
       }
     } catch (error) {
       console.error(
-        "AutoChangeManager: Unexpected error during IP change",
+        "AutoChangeManager: Unexpected error during IP change:",
         error
       );
+
+      // On any error, ensure direct proxy
+      try {
+        await proxyManager.disconnectProxyOnly();
+      } catch (directError) {
+        console.error(
+          "AutoChangeManager: Failed to disconnect proxy after error:",
+          directError
+        );
+      }
 
       if (this.isRunning) {
         this.remainingTime = 30;
         this.lastUpdateTime = Date.now();
         await this.saveState();
+
         this.scheduleTimer();
       }
     } finally {
@@ -597,8 +692,82 @@ class AutoChangeManager {
     }
   }
 
+  async verifyProxyDisconnected() {
+    try {
+      // For Firefox, verify proxy state is false
+      if (IS_FIREFOX) {
+        let attempts = 0;
+        const maxAttempts = 5;
+
+        while (attempts < maxAttempts) {
+          const state = await proxyRequestManager.loadFirefoxProxyState();
+
+          if (!state) {
+            break;
+          }
+
+          // Force clear again if still active
+          await proxyRequestManager.forceClearFirefoxProxy();
+          await this.sleep(300);
+          attempts++;
+        }
+
+        if (attempts >= maxAttempts) {
+          console.warn(
+            "AutoChangeManager: Could not verify Firefox proxy disconnection"
+          );
+        }
+      }
+
+      // For Chrome, verify proxy settings are cleared
+      if (IS_CHROME && browserAPI.proxy?.settings) {
+        try {
+          const config = await new Promise((resolve) => {
+            browserAPI.proxy.settings.get({ incognito: false }, (details) => {
+              resolve(details);
+            });
+          });
+
+          if (config && config.value && config.value.mode === "direct") {
+          } else {
+            await browserAPI.proxy.settings.clear({ scope: "regular" });
+            await this.sleep(500);
+          }
+        } catch (error) {
+          console.error(
+            "AutoChangeManager: Error verifying Chrome proxy:",
+            error
+          );
+        }
+      }
+
+      // Verify internal state
+      const currentProxy = proxyRequestManager.getCurrentProxy();
+      if (currentProxy.isActive) {
+        console.warn(
+          "AutoChangeManager: Internal proxy still active, clearing again"
+        );
+        await proxyRequestManager.clearProxy();
+        await this.sleep(300);
+      }
+    } catch (error) {
+      console.error(
+        "AutoChangeManager: Error verifying proxy disconnection:",
+        error
+      );
+    }
+  }
+
   async saveState() {
     try {
+      // Only save if we have valid config
+      if (!this.config || !this.config.apiKey) {
+        console.warn(
+          "AutoChangeManager: Cannot save state without valid config"
+        );
+        return;
+      }
+
       const state = {
         isRunning: this.isRunning,
         remainingTime: this.remainingTime,
@@ -621,13 +790,21 @@ class AutoChangeManager {
       const result = await browserAPI.storage.local.get(["autoChangeState"]);
       const state = result.autoChangeState;
 
-      if (state && state.isRunning) {
+      if (state && state.isRunning && state.config) {
         const now = Date.now();
         const timeSinceLastUpdate = Math.floor(
           (now - state.lastUpdateTime) / 1000
         );
 
+        // Only restore if not too old (less than 10 minutes)
         if (timeSinceLastUpdate < 600) {
+          // Validate config has required fields
+          if (!state.config.apiKey || !state.config.timeAutoChangeIP) {
+            console.warn("AutoChangeManager: Invalid config in saved state");
+            await this.clearState();
+            return false;
+          }
+
           this.isRunning = state.isRunning;
           this.originalDuration = state.originalDuration;
           this.config = state.config;
@@ -654,6 +831,7 @@ class AutoChangeManager {
       }
     } catch (error) {
       console.error("AutoChangeManager: Error loading state", error);
+      await this.clearState();
     }
 
     return false;
@@ -665,7 +843,13 @@ class AutoChangeManager {
       remainingTime: this.remainingTime,
       originalDuration: this.originalDuration,
       isChangingIP: this.isChangingIP,
-      config: this.config,
+      config: this.config
+        ? {
+            hasApiKey: !!this.config.apiKey,
+            location: this.config.location,
+            timeAutoChangeIP: this.config.timeAutoChangeIP,
+          }
+        : null,
       lastChangeTime: this.lastChangeTime,
       startTime: this.startTime,
       lastUpdateTime: this.lastUpdateTime,
@@ -691,20 +875,35 @@ class AutoChangeManager {
 
     await this.clearState();
 
+    // Clear all properties
     this.remainingTime = 0;
     this.originalDuration = 0;
     this.config = null;
     this.isChangingIP = false;
     this.lastUpdateTime = 0;
+    this.lastChangeTime = 0;
+    this.startTime = 0;
   }
 
   sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // Public getter for isChangingIP
+  get isChangingIPActive() {
+    return this.isChangingIP;
+  }
+
   sendToPopup(message, data = null) {
     try {
-      browserAPI.runtime.sendMessage({ greeting: message, data });
+      // Check if runtime is still valid before sending
+      if (browserAPI.runtime?.id) {
+        browserAPI.runtime
+          .sendMessage({ greeting: message, data })
+          .catch(() => {
+            // Popup might be closed, ignore error
+          });
+      }
     } catch (error) {
       // Popup might be closed, ignore error
     }
@@ -714,19 +913,21 @@ class AutoChangeManager {
 class MessageHandler {
   sendToPopup(message, data = null) {
     try {
-      browserAPI.runtime.sendMessage({ greeting: message, data });
-    } catch (error) {}
+      // Check if runtime is still valid before sending
+      if (browserAPI.runtime?.id) {
+        browserAPI.runtime
+          .sendMessage({ greeting: message, data })
+          .catch(() => {
+            // Popup might be closed, ignore error
+          });
+      }
+    } catch (error) {
+      // Popup is closed or not responding, ignore
+    }
   }
 
   async handleMessage(request, sender, sendResponse) {
     try {
-      console.log(
-        "Background: Received message:",
-        request.greeting,
-        "from",
-        request.data?.browser || "unknown"
-      );
-
       switch (request.greeting) {
         case "ping":
           sendResponse({ pong: true });
@@ -764,41 +965,107 @@ class MessageHandler {
 
         // NEW: Handle force disconnect for Firefox
         case CONFIG.MESSAGES.FORCE_DISCONNECT:
-          console.log("Background: Processing force disconnect for Firefox");
-
-          // Force clear Firefox proxy state immediately
-          await proxyRequestManager.forceClearFirefoxProxy();
-
-          // Clear authentication
-          authManager.clear();
-
-          // Clear browser proxy if possible
-          await BrowserProxyManager.clearBrowserProxy();
-
-          // Update badge
-          proxyManager.setBadgeOff();
-
-          console.log("Background: Force disconnect completed");
+          // Send response immediately
           sendResponse({ success: true });
+
+          // Process disconnection asynchronously
+          (async () => {
+            try {
+              // Stop any running auto change
+              await autoChangeManager.stop();
+
+              // Force clear Firefox proxy state multiple times
+              if (IS_FIREFOX) {
+                for (let i = 0; i < 3; i++) {
+                  await proxyRequestManager.forceClearFirefoxProxy();
+                  await this.sleep(200);
+                }
+              }
+
+              // Clear authentication
+              authManager.clear();
+
+              // Clear browser proxy
+              await BrowserProxyManager.clearBrowserProxy();
+
+              // Clear proxy settings
+              await proxyRequestManager.clearProxy();
+
+              // Update badge
+              proxyManager.setBadgeOff();
+
+              // Clear storage
+              await browserAPI.storage.sync.set({
+                [CONFIG.STORAGE_KEYS.TX_PROXY]: null,
+              });
+
+              console.log(
+                "Background: Force disconnect completed successfully"
+              );
+            } catch (error) {
+              console.error(
+                "Background: Error during force disconnect:",
+                error
+              );
+              // Try one more time
+              try {
+                await proxyManager.setDirectProxy();
+              } catch (e) {
+                console.error(
+                  "Background: Final attempt to disconnect failed:",
+                  e
+                );
+              }
+            }
+          })();
           break;
 
         case CONFIG.MESSAGES.CANCEL_ALL:
-          console.log("Background: Processing cancel all");
-
-          this.deleteAlarm("flagLoop");
-          this.deleteAlarm("refreshPage");
-          await autoChangeManager.stop();
-          await this.disconnectProxy(
-            request.data.apiKey,
-            request.data.whitelist_ip
-          );
-          await proxyManager.setDirectProxy();
+          // Don't wait for response, process immediately
           sendResponse({ success: true });
+
+          // Process disconnect asynchronously
+          (async () => {
+            try {
+              this.deleteAlarm("flagLoop");
+              this.deleteAlarm("refreshPage");
+              await autoChangeManager.stop();
+
+              // Ensure complete disconnection
+
+              await proxyManager.setDirectProxy();
+
+              // For Firefox, extra verification
+              if (IS_FIREFOX) {
+                await this.sleep(500);
+                // Double check Firefox state
+                const state = await proxyRequestManager.loadFirefoxProxyState();
+                if (state) {
+                  await proxyRequestManager.forceClearFirefoxProxy();
+                }
+              }
+            } catch (error) {
+              console.error("Background: Error during cancel all:", error);
+              // Even on error, try to ensure proxy is disconnected
+              try {
+                await proxyManager.setDirectProxy();
+              } catch (e) {
+                console.error(
+                  "Background: Failed to set direct proxy on error:",
+                  e
+                );
+              }
+            }
+          })();
           break;
 
         case CONFIG.MESSAGES.CHANGE_IP:
           await autoChangeManager.stop();
+
+          // Ensure proxy is disconnected before changing IP
           await proxyManager.setDirectProxy();
+          await this.sleep(IS_FIREFOX ? 2000 : 1000);
+
           await this.changeIP(
             request.data.apiKey,
             request.data.location,
@@ -810,7 +1077,12 @@ class MessageHandler {
         case CONFIG.MESSAGES.AUTO_CHANGE_IP:
           await autoChangeManager.stop();
           await this.sleep(500);
+
+          // Ensure proxy is disconnected before starting auto change
+
           await proxyManager.setDirectProxy();
+          await this.sleep(IS_FIREFOX ? 2000 : 1000);
+
           await this.changeIP(
             request.data.apiKey,
             request.data.location,
@@ -877,20 +1149,69 @@ class MessageHandler {
   async changeIP(apiKey, location, proxyType) {
     this.sendToPopup("showProcessingNewIpConnect", {});
 
-    const result = await APIService.changeIP(apiKey, location);
-    if (result?.code === 200) {
-      await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
-    } else {
-      const error =
-        result?.code === 500
-          ? CONFIG.ERRORS.CONNECTION_FAILED
-          : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
-      this.sendToPopup("failureGetProxyInfo", { error });
+    try {
+      // First, ensure proxy is completely disconnected
+      await proxyManager.setDirectProxy();
+
+      // Wait for proxy to be fully disconnected
+      const waitTime = IS_FIREFOX ? 2000 : 1000;
+      await this.sleep(waitTime);
+
+      const result = await APIService.changeIP(apiKey, location);
+
+      if (result?.code === 200) {
+        await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
+      } else {
+        const error =
+          result?.code === 500
+            ? CONFIG.ERRORS.CONNECTION_FAILED
+            : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
+        this.sendToPopup("failureGetProxyInfo", { error });
+      }
+    } catch (error) {
+      console.error("MessageHandler: Error during changeIP:", error);
+      this.sendToPopup("failureGetProxyInfo", {
+        error: CONFIG.ERRORS.UNKNOWN_ERROR,
+      });
     }
   }
 
   async disconnectProxy(apiKey, whitelistIp) {
-    return true;
+    try {
+      // Stop auto change if running
+      if (autoChangeManager.isRunning) {
+        await autoChangeManager.stop();
+      }
+
+      // Disconnect proxy
+      await proxyManager.setDirectProxy();
+
+      // Clear all stored states
+      await browserAPI.storage.local.remove([
+        "proxyConnected",
+        "isAutoChangeIP",
+        "timeAutoChangeIP",
+        "timeAutoChangeIPDefault",
+        "autoChangeState",
+        "firefoxProxyActive",
+      ]);
+
+      return true;
+    } catch (error) {
+      console.error("MessageHandler: Error disconnecting proxy:", error);
+
+      // Try once more
+      try {
+        await proxyManager.setDirectProxy();
+      } catch (e) {
+        console.error(
+          "MessageHandler: Second attempt to disconnect failed:",
+          e
+        );
+      }
+
+      return false;
+    }
   }
 
   deleteAlarm(name) {
@@ -910,10 +1231,34 @@ class MainProxyManager {
 
   async setDirectProxy() {
     try {
-      console.log("Background: Setting direct proxy...");
+      // Only stop auto change if it's not in the middle of changing IP
+      if (
+        autoChangeManager.isRunning &&
+        !autoChangeManager.isChangingIPActive
+      ) {
+        await autoChangeManager.stop();
+      } else if (autoChangeManager.isChangingIPActive) {
+      }
 
       // Clear internal proxy settings first
       await this.requestManager.clearProxy();
+
+      // For Firefox, ensure proxy state is cleared multiple times
+      if (IS_FIREFOX) {
+        for (let i = 0; i < 3; i++) {
+          await this.requestManager.forceClearFirefoxProxy();
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+
+        // Verify it's actually cleared
+        const state = await this.requestManager.loadFirefoxProxyState();
+        if (state) {
+          console.warn(
+            "Background: Firefox proxy still active after clearing, trying once more"
+          );
+          await this.requestManager.forceClearFirefoxProxy();
+        }
+      }
 
       // Clear browser proxy settings
       await BrowserProxyManager.clearBrowserProxy();
@@ -927,16 +1272,33 @@ class MainProxyManager {
         [CONFIG.STORAGE_KEYS.TX_PROXY]: null,
       });
 
+      // Clear local storage flags
+      await browserAPI.storage.local.remove([
+        "proxyConnected",
+        "isAutoChangeIP",
+        "timeAutoChangeIP",
+        "autoChangeState",
+      ]);
+
       console.log("Background: Direct proxy set successfully");
+      return true;
     } catch (error) {
       console.error("Error setting direct proxy:", error);
+
+      // Even on error, try to at least clear the proxy
+      try {
+        await BrowserProxyManager.clearBrowserProxy();
+        this.setBadgeOff();
+      } catch (e) {
+        console.error("Failed to clear proxy on error:", e);
+      }
+
+      return false;
     }
   }
 
   async setProxySettings(proxyInfo) {
     try {
-      console.log("Background: Setting proxy settings...", proxyInfo);
-
       const proxyConfig = {
         mode: `${proxyInfo.public_ip}:${proxyInfo.port}`,
         data: [
@@ -965,8 +1327,6 @@ class MainProxyManager {
       await browserAPI.storage.sync.set({
         [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
       });
-
-      console.log("Background: Proxy settings applied successfully");
     } catch (error) {
       console.error("Error setting proxy:", error);
       messageHandler.sendToPopup("failureGetProxyInfo", {
@@ -1051,12 +1411,42 @@ class MainProxyManager {
     }
   }
 
-  setBadgeOn(location) {
+  setBadgeOn() {
     try {
       browserAPI.action.setBadgeBackgroundColor({ color: [36, 162, 36, 255] });
       browserAPI.action.setBadgeText({ text: "ON" });
     } catch (error) {
       console.error("Error setting badge on:", error);
+    }
+  }
+
+  // NEW: Disconnect proxy without stopping auto change
+  async disconnectProxyOnly() {
+    try {
+      // Clear internal proxy settings
+      await this.requestManager.clearProxy();
+
+      // For Firefox, ensure proxy state is cleared
+      if (IS_FIREFOX) {
+        for (let i = 0; i < 3; i++) {
+          await this.requestManager.forceClearFirefoxProxy();
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      }
+
+      // Clear browser proxy settings
+      await BrowserProxyManager.clearBrowserProxy();
+
+      // Clear authentication
+      this.authManager.clear();
+
+      // Update badge
+      this.setBadgeOff();
+
+      return true;
+    } catch (error) {
+      console.error("Error disconnecting proxy only:", error);
+      return false;
     }
   }
 }
@@ -1070,48 +1460,120 @@ const proxyManager = new MainProxyManager();
 
 // Set up message listener
 browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  messageHandler.handleMessage(request, sender, sendResponse);
+  // Handle message asynchronously to prevent blocking
+  (async () => {
+    try {
+      await messageHandler.handleMessage(request, sender, sendResponse);
+    } catch (error) {
+      console.error("Background: Error in message handler:", error);
+      sendResponse({ error: error.message });
+    }
+  })();
+
+  // Return true to indicate async response
   return true;
+});
+
+// NEW: Handle disconnect when extension popup closes
+browserAPI.runtime.onConnect.addListener((port) => {
+  port.onDisconnect.addListener(() => {
+    // If there's a pending disconnect operation, ensure it completes
+    setTimeout(async () => {
+      try {
+        const currentProxy = proxyRequestManager.getCurrentProxy();
+        if (currentProxy.isActive) {
+          // Only disconnect if auto-change is not running
+          if (!autoChangeManager.isRunning) {
+            const result = await browserAPI.storage.local.get([
+              "proxyConnected",
+            ]);
+            if (!result.proxyConnected) {
+              await proxyManager.setDirectProxy();
+            }
+          }
+        }
+      } catch (error) {
+        console.error(
+          "Background: Error checking proxy state on popup close:",
+          error
+        );
+      }
+    }, 1000);
+  });
 });
 
 // Initialize extension
 const initializeExtension = async () => {
-  console.log(
-    `Background: Initializing extension... (${
-      IS_FIREFOX ? "Firefox" : "Chrome"
-    } mode)`
-  );
-
   try {
+    // Load proxy settings first
     await proxyRequestManager.loadSettings();
+
+    // Initialize proxy listener
     proxyRequestManager.initializeListener();
 
-    // FIXED: For Firefox, refresh state after loading settings
+    // ENHANCED: For Firefox, ensure proper state management
     if (IS_FIREFOX) {
-      await proxyRequestManager.forceRefreshFirefoxState();
+      const currentState = await proxyRequestManager.loadFirefoxProxyState();
+
+      // If proxy should be active but extension is starting fresh, refresh the state
+      if (
+        currentState &&
+        proxyRequestManager.mode &&
+        proxyRequestManager.proxy
+      ) {
+        await proxyRequestManager.forceRefreshFirefoxState();
+      } else if (
+        currentState &&
+        (!proxyRequestManager.mode || !proxyRequestManager.proxy)
+      ) {
+        // If state says active but no proxy config, clear it
+        await proxyRequestManager.forceClearFirefoxProxy();
+      }
     }
 
+    // Restore auto change manager state
     const restored = await autoChangeManager.loadState();
     if (restored) {
-      console.log("Background: Auto change manager state restored");
-    }
+      // ENHANCED: For Firefox, ensure proxy state is consistent with auto change
+      if (IS_FIREFOX && autoChangeManager.isRunning) {
+        setTimeout(async () => {
+          // Verify autoChangeManager still has valid config
+          if (!autoChangeManager.config || !autoChangeManager.config.apiKey) {
+            console.warn(
+              "Background: Auto change manager has no valid config, stopping"
+            );
+            await autoChangeManager.stop();
+            return;
+          }
 
-    console.log("Background: Extension initialized successfully");
+          const firefoxState =
+            await proxyRequestManager.loadFirefoxProxyState();
+          if (!firefoxState && proxyRequestManager.mode) {
+            await proxyRequestManager.forceRefreshFirefoxState();
+          }
+        }, 1000);
+      }
+    }
   } catch (error) {
     console.error("Background: Error during initialization:", error);
+
+    // ENHANCED: On error, ensure Firefox is in clean state
+    if (IS_FIREFOX) {
+      try {
+        await proxyRequestManager.forceClearFirefoxProxy();
+      } catch (cleanupError) {
+        console.error("Background: Firefox cleanup error:", cleanupError);
+      }
+    }
   }
 };
 
-// Extension event listeners
 browserAPI.runtime.onStartup.addListener(() => {
-  console.log("Background: Extension startup");
   initializeExtension();
 });
 
 browserAPI.runtime.onInstalled.addListener(() => {
-  console.log("Background: Extension installed");
   initializeExtension();
 });
 
-// Initialize on load
 initializeExtension();

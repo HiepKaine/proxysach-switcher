@@ -32,11 +32,10 @@
     "<all_urls>",
     "alarms",
     "downloads",
-    "notifications",
-    "privacy"
+    "notifications"
   ],
 
-  "optional_permissions": ["browsingData"],
+  "optional_permissions": ["browsingData", "privacy"],
 
   "browser_specific_settings": {
     "gecko": {

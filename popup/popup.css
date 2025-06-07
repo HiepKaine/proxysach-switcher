@@ -4,6 +4,11 @@
   justify-content: space-between;
 }
 
+.container-change-ip.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 .flex-s {
   display: flex;
   align-items: center;

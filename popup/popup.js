@@ -732,7 +732,8 @@ class UIManager {
       proxyInfo.public_ipv6;
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIMEOUT).innerText =
       proxyInfo.proxyTimeout;
-    document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText = "-";
+    document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
+      "0 s";
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT).value =
       proxyInfo.location;
 
@@ -779,7 +780,8 @@ class UIManager {
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.PUBLIC_IPV6).innerText =
       "";
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIMEOUT).innerText = "";
-    document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText = "";
+    document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
+      "0 s";
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP).innerText =
       "0";
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.API_KEY_ERROR).innerText =
@@ -916,10 +918,14 @@ class FormManager {
           timeValue;
       }
     }
+    ChangeIPManager.updateAutoChangeIPState();
   }
 
   static saveSettings(formData) {
-    if (formData.isAutoChangeIP) {
+    if (
+      formData.isAutoChangeIP &&
+      formData.changeIpType === POPUP_CONFIG.CHANGE_IP_TYPES.CHANGE
+    ) {
       StorageManager.set(
         POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT,
         formData.timeAutoChangeIP
@@ -933,6 +939,7 @@ class FormManager {
         formData.timeAutoChangeIP
       );
     } else {
+      // Clear auto change IP settings when change IP type is "keep"
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
       StorageManager.remove(
@@ -952,6 +959,103 @@ class FormManager {
   }
 }
 
+// NEW: ChangeIPManager class to handle change IP type logic
+class ChangeIPManager {
+  static init() {
+    // Add event listeners for change IP type radio buttons
+    const changeIpElements = document.querySelectorAll(
+      POPUP_CONFIG.UI_ELEMENTS.RADIO_SWITCH_CHANGE_IP
+    );
+
+    changeIpElements.forEach((element) => {
+      element.addEventListener("change", () => {
+        this.updateAutoChangeIPState();
+      });
+    });
+
+    // Initialize state on load
+    this.updateAutoChangeIPState();
+  }
+
+  static updateAutoChangeIPState() {
+    const changeIpType = FormManager.getChangeIpType();
+    const autoChangeCheckbox = document.getElementById(
+      POPUP_CONFIG.UI_ELEMENTS.IS_AUTO_CHANGE
+    );
+    const timeChangeInput = document.getElementById(
+      POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
+    );
+
+    const containerChangeIP = document.querySelector(".container-change-ip");
+
+    if (changeIpType === POPUP_CONFIG.CHANGE_IP_TYPES.KEEP) {
+      // Force disable and uncheck auto change IP when "keep" is selected
+      if (autoChangeCheckbox) {
+        // If auto change was previously enabled, turn it off first
+        if (autoChangeCheckbox.checked) {
+          autoChangeCheckbox.checked = false;
+
+          // Trigger change event to ensure any listeners are notified
+          const changeEvent = new Event("change", { bubbles: true });
+          autoChangeCheckbox.dispatchEvent(changeEvent);
+        }
+
+        // Then disable the checkbox
+        autoChangeCheckbox.disabled = true;
+      }
+
+      if (timeChangeInput) {
+        timeChangeInput.disabled = true;
+        // Reset time input to default value
+        timeChangeInput.value = "60";
+      }
+
+      if (containerChangeIP) {
+        containerChangeIP.classList.add("disabled");
+      }
+
+      // Stop any running auto change IP timer
+      timerManager.forceStopAll();
+
+      // Clear auto change IP storage completely
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
+      StorageManager.remove(
+        POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
+      );
+    } else {
+      // Enable auto change IP when "change" is selected
+      if (autoChangeCheckbox) {
+        autoChangeCheckbox.disabled = false;
+      }
+
+      if (timeChangeInput) {
+        timeChangeInput.disabled = false;
+
+        // Restore previous time value if available
+        const savedTime = StorageManager.get(
+          POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
+        );
+        if (savedTime && savedTime !== "0") {
+          timeChangeInput.value = savedTime;
+        } else {
+          // Set default time if no saved value
+          timeChangeInput.value = "60"; // Default 5 minutes
+        }
+      }
+
+      if (containerChangeIP) {
+        containerChangeIP.classList.remove("disabled");
+      }
+    }
+  }
+
+  static isChangeIPAllowed() {
+    const changeIpType = FormManager.getChangeIpType();
+    return changeIpType === POPUP_CONFIG.CHANGE_IP_TYPES.CHANGE;
+  }
+}
+
 class ProxyManager {
   static async handleClick() {
     const formData = FormManager.getFormData();
@@ -962,11 +1066,19 @@ class ProxyManager {
       return;
     }
 
+    // NEW: Validate change IP type before processing
+    if (formData.isAutoChangeIP && !ChangeIPManager.isChangeIPAllowed()) {
+      document.getElementById(POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS).innerText =
+        "• Cần chọn 'Đổi IP' để sử dụng tự động đổi IP";
+      return;
+    }
+
     FormManager.saveSettings(formData);
 
     const config = {
       apiKey: formData.apiKey,
-      isAutoChangeIP: formData.isAutoChangeIP,
+      isAutoChangeIP:
+        formData.isAutoChangeIP && ChangeIPManager.isChangeIPAllowed(),
       timeAutoChangeIP:
         localStorage.getItem("timeAutoChangeIP") || formData.timeAutoChangeIP,
       proxyType: formData.proxyType,
@@ -976,17 +1088,28 @@ class ProxyManager {
       config.location = formData.location;
     }
 
-    if (formData.isAutoChangeIP) {
-      await MessageHandler.sendToBackground(
-        POPUP_CONFIG.BACKGROUND_MESSAGES.AUTO_CHANGE_IP,
-        config
-      );
-    } else if (formData.changeIpType === POPUP_CONFIG.CHANGE_IP_TYPES.CHANGE) {
-      await MessageHandler.sendToBackground(
-        POPUP_CONFIG.BACKGROUND_MESSAGES.CHANGE_IP,
-        config
-      );
+    // NEW: Only allow change IP operations when change IP type is "change"
+    if (ChangeIPManager.isChangeIPAllowed()) {
+      if (formData.isAutoChangeIP) {
+        await MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.AUTO_CHANGE_IP,
+          config
+        );
+      } else if (
+        formData.changeIpType === POPUP_CONFIG.CHANGE_IP_TYPES.CHANGE
+      ) {
+        await MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.CHANGE_IP,
+          config
+        );
+      } else {
+        await MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY,
+          config
+        );
+      }
     } else {
+      // When "keep" is selected, only get current proxy info
       await MessageHandler.sendToBackground(
         POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY,
         config
@@ -1014,7 +1137,11 @@ class ProxyManager {
           POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
         );
 
-        if (JSON.parse(isAutoChangeIP) && timeAutoChangeIPDefault) {
+        if (
+          JSON.parse(isAutoChangeIP) &&
+          timeAutoChangeIPDefault &&
+          ChangeIPManager.isChangeIPAllowed()
+        ) {
           const defaultTime = Number(timeAutoChangeIPDefault);
           StorageManager.set(
             POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
@@ -1190,6 +1317,8 @@ class AppInitializer {
         FormManager.loadStoredSettings();
       }
 
+      ChangeIPManager.init();
+
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       const proxyConnected = StorageManager.get(
@@ -1201,7 +1330,11 @@ class AppInitializer {
 
       let timerInitialized = false;
 
-      if (proxyConnected === "true" && JSON.parse(isAutoChangeIP)) {
+      if (
+        proxyConnected === "true" &&
+        JSON.parse(isAutoChangeIP) &&
+        ChangeIPManager.isChangeIPAllowed()
+      ) {
         timerInitialized = await timerManager.initializeTimer();
         if (timerInitialized) {
           await new Promise((resolve) => setTimeout(resolve, 500));
@@ -1251,7 +1384,11 @@ document.addEventListener("visibilitychange", async () => {
       POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
     );
 
-    if (JSON.parse(isAutoChangeIP) && proxyConnected === "true") {
+    if (
+      JSON.parse(isAutoChangeIP) &&
+      proxyConnected === "true" &&
+      ChangeIPManager.isChangeIPAllowed()
+    ) {
       setTimeout(async () => {
         await timerManager.initializeTimer();
       }, 500);
