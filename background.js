@@ -26,7 +26,7 @@ const CONFIG = {
     CANCEL_ALL: "cancelALL",
     CHANGE_IP: "changeIp",
     AUTO_CHANGE_IP: "autoChangeIp",
-    FORCE_DISCONNECT: "forceDisconnect",
+    FORCE_DISCONNECT: "forceDisconnect", // New message for Firefox
   },
   ERRORS: {
     CONNECTION_FAILED: "Kết Nối Thất Bại",
@@ -217,6 +217,17 @@ class ProxyRequestManager {
     }
   }
 
+  async loadFirefoxProxyState() {
+    try {
+      const result = await browserAPI.storage.local.get([
+        CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE,
+      ]);
+      return result[CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE] || false;
+    } catch (error) {
+      return false;
+    }
+  }
+
   initializeListener() {
     if (this.isListenerAdded || !browserAPI.proxy?.onRequest) return;
 
@@ -341,6 +352,19 @@ class ProxyRequestManager {
     }
   }
 
+  // NEW: Force clear method for Firefox
+  async forceClearFirefoxProxy() {
+    if (IS_FIREFOX) {
+      this.isFirefoxProxyActive = false;
+      await this.saveFirefoxProxyState(false);
+
+      // Additional cleanup
+      this.mode = "";
+      this.proxy = {};
+      this.isInitialized = false;
+    }
+  }
+
   getCurrentProxy() {
     return {
       mode: this.mode,
@@ -410,7 +434,6 @@ class BrowserProxyManager {
           type: proxyInfo.type || "http",
           proxyDNS: true,
           active: true,
-          isIPv6: proxyInfo.isIPv6 || false,
         },
       ],
     };
@@ -476,16 +499,10 @@ class BrowserProxyManager {
   }
 
   static getSingleProxyRule(proxy) {
-    // Format IPv6 addresses properly with brackets
-    let host = proxy.hostname;
-    if (proxy.isIPv6 && host.includes(':') && !host.startsWith('[')) {
-      host = `[${host}]`;
-    }
-
     return {
       singleProxy: {
         scheme: proxy.type,
-        host: host,
+        host: proxy.hostname,
         port: parseInt(proxy.port),
       },
     };
@@ -1293,7 +1310,6 @@ class MainProxyManager {
             password: proxyInfo.password,
             proxyDNS: true,
             active: true,
-            isIPv6: proxyInfo.isIPv6 || false,
           },
         ],
       };
@@ -1345,42 +1361,19 @@ class MainProxyManager {
     const portV4 = response.ipv4 ? this.extractPort(response.ipv4) : "";
     const portV6 = response.ipv6 ? this.extractPort(response.ipv6) : "";
 
-    // FIXED: Properly handle IPv6 selection
-    let publicIp;
-    let isIPv6 = false;
-    
-    if (proxyType === "ipv6") {
-      // When IPv6 is selected, use IPv6 address
-      publicIp = response.public_ipv6;
-      isIPv6 = true;
-      
-      // If IPv6 contains domain, resolve it
-      if (response.ipv6 && this.containsDomain(response.ipv6)) {
-        try {
-          // For IPv6 domains, we need to resolve to AAAA records
-          const domain = response.ipv6.split(":")[0];
-          // Note: This might need a different API endpoint for AAAA records
-          // For now, we'll use the public_ipv6 directly
-        } catch (error) {
-          console.error("Error resolving IPv6 domain:", error);
-        }
-      }
-    } else {
-      // For IPv4, use existing logic
-      publicIp = response.public_ipv4;
-      if (response.ipv4 && this.containsDomain(response.ipv4)) {
-        try {
-          publicIp = await APIService.resolveDomain(response.ipv4.split(":")[0]);
-        } catch (error) {
-          console.error("Error resolving domain:", error);
-        }
+    let publicIp = response.public_ipv4;
+    if (response.ipv4 && this.containsDomain(response.ipv4)) {
+      try {
+        publicIp = await APIService.resolveDomain(response.ipv4.split(":")[0]);
+      } catch (error) {
+        console.error("Error resolving domain:", error);
       }
     }
 
-    const proxyInfo = {
+    return {
       public_ipv6: response.public_ipv6 || "",
       public_ipv4: response.public_ipv4 || "",
-      public_ip: publicIp,
+      public_ip: publicIp || response.public_ipv4,
       username: response.credential?.username,
       password: response.credential?.password,
       proxyTimeout: response.proxyTimeout,
@@ -1391,9 +1384,7 @@ class MainProxyManager {
       apiKey,
       port: this.selectPort(proxyType, portV4, portV6),
       type: response.proxyType || "http",
-      isIPv6: isIPv6,
     };
-    return proxyInfo;
   }
 
   extractPort(address) {
