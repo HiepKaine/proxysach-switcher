@@ -13,6 +13,10 @@ const POPUP_CONFIG = {
     PROXY_CONNECTED: "proxyConnected",
     TX_CONF: "tx_conf",
     TX_PROXY: "tx_proxy",
+    CACHED_PROXY_INFO: "cachedProxyInfo",
+    CACHED_LOCATIONS: "cachedLocations",
+    NEXT_CHANGE_TARGET: "nextChangeTarget",
+    NEXT_CHANGE_DURATION: "nextChangeDuration",
   },
   MESSAGES: {
     GET_LOCATIONS_SUCCESS: "getLocationsSuccess",
@@ -67,6 +71,8 @@ const POPUP_CONFIG = {
     CONNECTED: "• Đã kết nối",
     INVALID_KEY: "• Key Không Hợp Lệ",
     LOADING_PROXY_INFO: "• Đang tải thông tin...",
+    PROXY_EXPIRED: "• Hết hạn proxy",
+    KEY_EXPIRED: "• Hết hạn key",
   },
 };
 
@@ -104,6 +110,154 @@ class StorageManager {
     try {
       localStorage.clear();
     } catch (error) {}
+  }
+
+  // NEW: Enhanced methods for proxy info caching
+  static setCachedProxyInfo(proxyInfo) {
+    try {
+      const cachedData = {
+        proxyInfo: proxyInfo,
+        timestamp: Date.now(),
+        version: 1,
+      };
+      this.set(POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO, cachedData);
+    } catch (error) {
+      console.error("Popup: Error caching proxy info:", error);
+    }
+  }
+
+  static getCachedProxyInfo() {
+    try {
+      const cachedData = this.get(
+        POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO,
+        true
+      );
+      if (cachedData && cachedData.proxyInfo) {
+        const proxyInfo = cachedData.proxyInfo;
+
+        // Check expiration times
+        const currentTime = Math.floor(Date.now() / 1000); // Current time in seconds
+
+        // Check key expiration first (higher priority)
+        if (proxyInfo.expired && currentTime >= proxyInfo.expired) {
+          this.clearCachedProxyInfo();
+          return {
+            expired: "key",
+            error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED,
+          };
+        }
+
+        // Check proxy timeout
+        if (proxyInfo.proxyTimeout && currentTime >= proxyInfo.proxyTimeout) {
+          this.clearCachedProxyInfo();
+          return {
+            expired: "proxy",
+            error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED,
+          };
+        }
+
+        return proxyInfo;
+      }
+      return null;
+    } catch (error) {
+      console.error("Popup: Error loading cached proxy info:", error);
+      return null;
+    }
+  }
+
+  static clearCachedProxyInfo() {
+    try {
+      this.remove(POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO);
+    } catch (error) {
+      console.error("Popup: Error clearing cached proxy info:", error);
+    }
+  }
+
+  // NEW: Locations caching methods
+  static setCachedLocations(locations) {
+    try {
+      const cachedData = {
+        locations: locations,
+        timestamp: Date.now(),
+        version: 1,
+      };
+      this.set(POPUP_CONFIG.STORAGE_KEYS.CACHED_LOCATIONS, cachedData);
+    } catch (error) {
+      console.error("Popup: Error caching locations:", error);
+    }
+  }
+
+  static getCachedLocations() {
+    try {
+      const cachedData = this.get(
+        POPUP_CONFIG.STORAGE_KEYS.CACHED_LOCATIONS,
+        true
+      );
+      if (cachedData && cachedData.locations) {
+        return cachedData.locations;
+      }
+      return null;
+    } catch (error) {
+      console.error("Popup: Error loading cached locations:", error);
+      return null;
+    }
+  }
+
+  static clearCachedLocations() {
+    try {
+      this.remove(POPUP_CONFIG.STORAGE_KEYS.CACHED_LOCATIONS);
+    } catch (error) {
+      console.error("Popup: Error clearing cached locations:", error);
+    }
+  }
+
+  // NEW: Next change timer persistence methods
+  static setNextChangeTimer(targetTime, duration) {
+    try {
+      const timerData = {
+        targetTime: targetTime, // Timestamp when next change should happen
+        duration: duration, // Original duration in seconds
+        startTime: Date.now(), // When this timer was set
+        version: 1,
+      };
+      this.set(POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET, timerData);
+    } catch (error) {
+      console.error("Popup: Error saving next change timer:", error);
+    }
+  }
+
+  static getNextChangeTimer() {
+    try {
+      const timerData = this.get(
+        POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET,
+        true
+      );
+      if (timerData && timerData.targetTime) {
+        const now = Date.now();
+        const remainingMs = timerData.targetTime - now;
+        const remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
+        return {
+          remainingSeconds: remainingSeconds,
+          originalDuration: timerData.duration,
+          startTime: timerData.startTime,
+          targetTime: timerData.targetTime,
+          isExpired: remainingSeconds <= 0,
+        };
+      }
+      return null;
+    } catch (error) {
+      console.error("Popup: Error loading next change timer:", error);
+      return null;
+    }
+  }
+
+  static clearNextChangeTimer() {
+    try {
+      this.remove(POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET);
+      FF;
+    } catch (error) {
+      console.error("Popup: Error clearing next change timer:", error);
+    }
   }
 }
 
@@ -195,6 +349,11 @@ class MessageHandler {
           break;
         case POPUP_CONFIG.MESSAGES.FAILURE_GET_PROXY_INFO:
           UIManager.showError(request);
+          setTimeout(async () => {
+            await LocationManager.forceDisconnectProxy(
+              `API failure: ${request.data?.error || "Unknown error"}`
+            );
+          }, 2000);
           break;
         case POPUP_CONFIG.MESSAGES.SUCCESS_GET_PROXY_INFO:
           ProxyManager.handleSuccessfulConnection(request.data);
@@ -244,7 +403,6 @@ class TimerManager {
     this.isInitialized = false;
   }
 
-  // ... [Keep all existing TimerManager methods unchanged] ...
   async syncWithBackground() {
     try {
       const response = await browserAPI.runtime.sendMessage({
@@ -375,6 +533,8 @@ class TimerManager {
       const syncResult = await this.syncWithBackground();
 
       if (syncResult.status === "success" && syncResult.remainingTime > 0) {
+        // FIXED: Actually start the countdown timer display with remaining time
+        this.startTimeChangeCountdownWithTime(syncResult.remainingTime);
         return true;
       } else if (syncResult.status === "changing") {
         this.showChangingIPStatus();
@@ -455,6 +615,18 @@ class TimerManager {
     }
   }
 
+  // ENHANCED: Clear next time change state with proper cleanup
+  clearNextTimeChangeState() {
+    this.clearCountDown();
+    this.countDowntime = 0;
+    // Clear stored next time change data
+    StorageManager.clearNextChangeTimer();
+    const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME);
+    if (element) {
+      element.innerText = "0 s";
+    }
+  }
+
   async handleTimerExpiredWithWait() {
     try {
       let attempts = 0;
@@ -511,6 +683,7 @@ class TimerManager {
     this.clearCountDown();
     this.clearTimeChangeCountdown();
     this.stopSyncCheck();
+    this.clearNextTimeChangeState(); // ENHANCED: Use the enhanced method
     this.countDowntime = 0;
     this.totalTimeChangeIp = 0;
     this.autoChangeInterval = 0;
@@ -518,6 +691,17 @@ class TimerManager {
     this.isPopupControlling = false;
     this.isInitialized = false;
     this.markPopupInactive();
+  }
+
+  // ENHANCED: Clear only next time change countdown, preserve auto change timer
+  clearNextTimeChangeOnly() {
+    this.clearCountDown();
+    this.countDowntime = 0;
+    StorageManager.clearNextChangeTimer();
+    const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME);
+    if (element) {
+      element.innerText = "0 s";
+    }
   }
 
   forceStopAll() {
@@ -591,11 +775,25 @@ class TimerManager {
     return false;
   }
 
-  startCountDown() {
+  // ENHANCED: Start countdown with persistent timer
+  startCountDown(seconds = null) {
     this.clearCountDown();
 
-    if (!this.countDowntime) return;
+    // Use provided seconds or stored countDowntime
+    const targetSeconds = seconds !== null ? seconds : this.countDowntime;
 
+    if (!targetSeconds || targetSeconds <= 0) {
+      return;
+    }
+
+    // Calculate target timestamp
+    const now = Date.now();
+    const targetTime = now + targetSeconds * 1000;
+
+    // Save timer state
+    StorageManager.setNextChangeTimer(targetTime, targetSeconds);
+
+    this.countDowntime = targetSeconds;
     this.nextTimeChange = setInterval(() => {
       const element = document.getElementById(
         POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
@@ -611,9 +809,40 @@ class TimerManager {
       if (this.countDowntime < 0) {
         element.innerText = "0 s";
         this.clearCountDown();
+        // Clear the stored timer when it expires
+        StorageManager.clearNextChangeTimer();
         return;
       }
+
+      // Update the stored timer with remaining time
+      const remainingTime = Date.now() + this.countDowntime * 1000;
+      StorageManager.setNextChangeTimer(remainingTime, this.countDowntime);
     }, 1000);
+  }
+
+  // ENHANCED: Restore countdown from stored state
+  restoreCountDown() {
+    const timerData = StorageManager.getNextChangeTimer();
+
+    if (!timerData) {
+      return false;
+    }
+
+    if (timerData.isExpired) {
+      StorageManager.clearNextChangeTimer();
+
+      const element = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
+      );
+      if (element) {
+        element.innerText = "0 s";
+      }
+      return false;
+    }
+
+    // Start countdown with remaining time
+    this.startCountDown(timerData.remainingSeconds);
+    return true;
   }
 
   clearCountDown() {
@@ -638,16 +867,53 @@ class TimerManager {
 }
 
 class LocationManager {
+  // ENHANCED: Load from cache or API
+  static async loadLocations() {
+    // First, try to load from cache
+    const cachedLocations = StorageManager.getCachedLocations();
+
+    if (cachedLocations) {
+      this.populateLocationDropdown(cachedLocations);
+      return;
+    }
+
+    // If no cache, call API
+    try {
+      const response = await MessageHandler.sendToBackground(
+        POPUP_CONFIG.BACKGROUND_MESSAGES.GET_LOCATIONS_DATA
+      );
+
+      if (response && response.data) {
+        // Cache the locations data
+        StorageManager.setCachedLocations(response.data);
+        this.populateLocationDropdown(response.data);
+      } else {
+        console.error("Popup: Failed to get locations from API");
+      }
+    } catch (error) {
+      console.error("Popup: Error calling locations API:", error);
+    }
+  }
+
   static handleLocationsSuccess(locations) {
+    if (locations) {
+      // Cache the locations data when received from background
+      StorageManager.setCachedLocations(locations);
+      this.populateLocationDropdown(locations);
+    }
+  }
+
+  static populateLocationDropdown(locations) {
     const selectElement = document.getElementById(
       POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
     );
 
+    // Clear existing options
     while (selectElement.hasChildNodes()) {
       selectElement.removeChild(selectElement.firstChild);
     }
 
-    if (locations) {
+    if (locations && locations.length > 0) {
       locations.forEach((location) => {
         const option = document.createElement("option");
         option.textContent = location.name;
@@ -657,38 +923,163 @@ class LocationManager {
     }
   }
 
+  // MODIFIED: Load proxy info from cache instead of calling API
   static async getProxyInfoIfConnected(preserveTimer = false) {
     const proxyConnected = StorageManager.get(
       POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
     );
 
     if (proxyConnected === "true") {
-      UIManager.showLoadingProxyInfo();
+      // Try to load cached proxy info first
+      const cachedProxyInfo = StorageManager.getCachedProxyInfo();
 
-      const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
-      const proxyType =
-        StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_TYPE) || "ipv4";
-
-      if (apiKey) {
-        try {
-          await MessageHandler.sendToBackground(
-            POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY,
-            {
-              apiKey: apiKey,
-              proxyType: proxyType,
-              preserveTimer: preserveTimer,
-            }
+      if (cachedProxyInfo) {
+        // Check if it's an expiration error
+        if (cachedProxyInfo.expired) {
+          // Show error message
+          const statusElement = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
           );
-        } catch (error) {
+          if (statusElement) {
+            statusElement.innerText = cachedProxyInfo.error;
+            statusElement.classList.remove(
+              POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
+            );
+            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+          }
+
+          await this.forceDisconnectProxy("Expiration detected");
+
+          return;
+        }
+
+        UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
+        ProxyManager.updateProxyUIStatus();
+
+        if (cachedProxyInfo.location) {
+          const locationSelect = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
+          );
+          if (locationSelect) {
+            locationSelect.value = cachedProxyInfo.location;
+          }
+        }
+
+        return;
+      } else {
+        const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
+        const proxyType =
+          StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_TYPE) || "ipv4";
+
+        if (apiKey) {
+          UIManager.showLoadingProxyInfo();
+          try {
+            await MessageHandler.sendToBackground(
+              POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY,
+              {
+                apiKey: apiKey,
+                proxyType: proxyType,
+                preserveTimer: preserveTimer,
+              }
+            );
+          } catch (error) {
+            console.error("Popup: Error getting current proxy info:", error);
+
+            // ENHANCED: Auto-disconnect on API error
+            await this.forceDisconnectProxy("API error");
+          }
+        } else {
           UIManager.setNotConnectedStatus();
           StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+          StorageManager.clearCachedProxyInfo();
         }
-      } else {
-        UIManager.setNotConnectedStatus();
-        StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
       }
     } else {
       UIManager.setNotConnectedStatus();
+      StorageManager.clearCachedProxyInfo();
+    }
+  }
+
+  // NEW: Force disconnect proxy method
+  static async forceDisconnectProxy(reason = "Unknown") {
+    try {
+      // Stop all timers first
+      timerManager.forceStopAll();
+
+      // Clear all local storage
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      StorageManager.clearCachedProxyInfo();
+      StorageManager.clearCachedLocations();
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
+
+      // Reset UI
+      UIManager.setNotConnectedStatus();
+      const ipInfoElement = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.IP_INFO
+      );
+      if (ipInfoElement) {
+        ipInfoElement.style.display = "none";
+      }
+
+      // Reset auto change checkbox
+      const autoChangeCheckbox = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.IS_AUTO_CHANGE
+      );
+      if (autoChangeCheckbox) {
+        autoChangeCheckbox.checked = false;
+      }
+
+      // Send disconnect commands to background
+      const config = {
+        reason: reason,
+        timestamp: Date.now(),
+        browser: IS_FIREFOX ? "firefox" : "chrome",
+      };
+
+      if (IS_FIREFOX) {
+        // For Firefox, send force disconnect first
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.FORCE_DISCONNECT,
+          config
+        );
+
+        // Small delay then send cancel all
+        setTimeout(() => {
+          MessageHandler.sendToBackground(
+            POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+            config
+          );
+        }, 200);
+      } else {
+        // For Chrome, send cancel all
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+          config
+        );
+      }
+
+      // Clear Chrome storage
+      try {
+        await ChromeStorageManager.set(
+          POPUP_CONFIG.STORAGE_KEYS.TX_PROXY,
+          null
+        );
+        await ChromeStorageManager.set(
+          POPUP_CONFIG.STORAGE_KEYS.TX_CONF,
+          config
+        );
+      } catch (storageError) {
+        console.error("Popup: Error clearing Chrome storage:", storageError);
+      }
+    } catch (error) {
+      console.error("Popup: Error during force disconnect:", error);
+
+      // Fallback: at least reset UI
+      UIManager.setNotConnectedStatus();
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      StorageManager.clearCachedProxyInfo();
     }
   }
 }
@@ -725,6 +1116,7 @@ class UIManager {
     statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
   }
 
+  // ENHANCED: Show proxy info with persistent nextChangeIP timer
   static showProxyInfo(proxyInfo, isStart = false, preserveTimer = false) {
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.PUBLIC_IPV4).innerText =
       proxyInfo.public_ipv4;
@@ -732,8 +1124,6 @@ class UIManager {
       proxyInfo.public_ipv6;
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIMEOUT).innerText =
       proxyInfo.proxyTimeout;
-    document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
-      "0 s";
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT).value =
       proxyInfo.location;
 
@@ -753,11 +1143,20 @@ class UIManager {
     statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
     statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
 
-    if (!preserveTimer) {
-      timerManager.setCountDowntime(proxyInfo.nextChangeIP || 0);
-      if (proxyInfo.nextChangeIP > 0) {
+    // ENHANCED: Always try to restore nextChangeIP timer first, regardless of preserveTimer
+    const restored = timerManager.restoreCountDown();
+
+    if (!restored) {
+      // If no saved timer and we have nextChangeIP from API, use it
+      if (proxyInfo.nextChangeIP && proxyInfo.nextChangeIP > 0) {
+        timerManager.setCountDowntime(proxyInfo.nextChangeIP);
         timerManager.startCountDown();
+      } else {
+        // No timer data at all, show 0
+        document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
+          "0 s";
       }
+    } else {
     }
   }
 
@@ -765,8 +1164,13 @@ class UIManager {
     const statusElement = document.getElementById(
       POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
     );
+    statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
     statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
     statusElement.innerText = `• ${messageData.data.error}`;
+
+    // ENHANCED: Enable connect button on error
+    this.enableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
+    this.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT);
   }
 
   static clearPopupPage() {
@@ -1117,18 +1521,68 @@ class ProxyManager {
     }
   }
 
+  // MODIFIED: Enhanced to cache proxy info and handle all success cases
   static handleSuccessfulConnection(proxyData, preserveTimer = false) {
+    // FIXED: Smart timer handling based on context
     if (!preserveTimer) {
       timerManager.forceStopAll();
+    } else {
+      // When preserveTimer is true, only clear nextChangeIP timer, keep auto change timer
+
+      timerManager.clearNextTimeChangeOnly();
+    }
+
+    // Check expiration before caching and showing
+    const currentTime = Math.floor(Date.now() / 1000);
+
+    // Check key expiration first
+    if (proxyData.expired && currentTime >= proxyData.expired) {
+      UIManager.showError({
+        data: {
+          error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED.replace("• ", ""),
+        },
+      });
+
+      // Auto-disconnect due to key expiration
+      setTimeout(async () => {
+        await LocationManager.forceDisconnectProxy("Key expired");
+      }, 1000);
+      return;
+    }
+
+    // Check proxy timeout
+    if (proxyData.proxyTimeout && currentTime >= proxyData.proxyTimeout) {
+      UIManager.showError({
+        data: {
+          error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED.replace("• ", ""),
+        },
+      });
+
+      // Auto-disconnect due to proxy timeout
+      setTimeout(async () => {
+        await LocationManager.forceDisconnectProxy("Proxy timeout");
+      }, 1000);
+      return;
     }
 
     setTimeout(() => {
-      ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_PROXY, proxyData);
+      // ENHANCED: Update proxy cache with latest API data
+      const cacheUpdateSuccess = this.updateProxyCache(
+        proxyData,
+        "ChangeIP/Connect API"
+      );
+
+      if (!cacheUpdateSuccess) {
+        console.warn(
+          "Popup: Failed to update proxy cache, but continuing with UI update"
+        );
+      }
+
+      // Update UI with latest proxy info (preserveTimer is passed to showProxyInfo)
       UIManager.showProxyInfo(proxyData, false, preserveTimer);
       this.updateProxyUIStatus();
 
-      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO, proxyData);
-
+      // FIXED: Only start auto change timer if not preserving timers and auto change is enabled
       if (!preserveTimer) {
         const isAutoChangeIP = StorageManager.get(
           POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
@@ -1147,13 +1601,18 @@ class ProxyManager {
             POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
             defaultTime
           );
+
           timerManager.startTimeChangeCountdownWithTime(defaultTime);
         }
+      } else {
       }
     }, 100);
   }
 
   static handleInfoKeySuccess(data) {
+    // When getInfoKey succeeds, trigger handleClick to process the proxy data
+    // This will eventually call handleSuccessfulConnection which updates cache
+
     this.handleClick();
   }
 
@@ -1161,9 +1620,35 @@ class ProxyManager {
     StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED, "true");
   }
 
+  // NEW: Dedicated method to update proxy cache with latest API data
+  // This method is called whenever we receive fresh proxy data from API:
+  // - Manual changeIP success
+  // - Auto changeIP success
+  // - getCurrentProxy success
+  // - Initial connect success
+  static updateProxyCache(proxyData, source = "API") {
+    try {
+      // Always update cache with latest data
+      StorageManager.setCachedProxyInfo(proxyData);
+
+      // Also update Chrome storage for background sync
+      ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_PROXY, proxyData);
+
+      // Update local proxy info storage
+      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO, proxyData);
+
+      return true;
+    } catch (error) {
+      console.error(`Popup: Error updating proxy cache from ${source}:`, error);
+      return false;
+    }
+  }
+
+  // MODIFIED: Enhanced to clear cached proxy info, locations, and nextTimeChange state
   static directProxy() {
     timerManager.forceStopAll();
 
+    // Clear all proxy-related storage including cache
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
@@ -1171,6 +1656,13 @@ class ProxyManager {
     StorageManager.remove(
       POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
     );
+
+    // ENHANCED: Clear cached proxy info and locations
+    StorageManager.clearCachedProxyInfo();
+    StorageManager.clearCachedLocations();
+
+    // ENHANCED: Clear nextTimeChange state
+    timerManager.clearNextTimeChangeState();
 
     const autoChangeCheckbox = document.getElementById(
       POPUP_CONFIG.UI_ELEMENTS.IS_AUTO_CHANGE
@@ -1308,9 +1800,8 @@ class AppInitializer {
         }
       }
 
-      await MessageHandler.sendToBackground(
-        POPUP_CONFIG.BACKGROUND_MESSAGES.GET_LOCATIONS_DATA
-      );
+      // ENHANCED: Load locations from cache or API
+      await LocationManager.loadLocations();
 
       const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
       if (apiKey) {
@@ -1341,6 +1832,7 @@ class AppInitializer {
         }
       }
 
+      // MODIFIED: Always check for cached proxy info when proxy is connected
       if (proxyConnected === "true") {
         await LocationManager.getProxyInfoIfConnected(timerInitialized);
       }

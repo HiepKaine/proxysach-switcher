@@ -1,31 +1,46 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 2,
   "name": "VNProxy Switcher",
-  "description": "VNProxy Switcher – Tiện ích fake IP, đổi proxy nhanh chóng chỉ với một cú nhấp chuột!",
-  "version": "1.0",
-  "action": {
+  "description": "VNProxy Switcher - Tiện ích fake IP, đổi proxy nhanh chóng chỉ với một cú nhấp chuột!",
+  "version": "1.0.0",
+
+  "browser_action": {
     "default_popup": "popup/popup.html",
-    "default_icon": "images/logo-favicon-48.png"
+    "default_icon": {
+      "16": "images/logo-favicon-16.png",
+      "48": "images/logo-favicon-48.png"
+    }
   },
+
   "icons": {
     "16": "images/logo-favicon-16.png",
     "48": "images/logo-favicon-48.png",
     "128": "images/logo-favicon-128.png"
   },
+
   "background": {
-    "type": "module",
-    "service_worker": "background.js"
+    "scripts": ["background.js"],
+    "persistent": true
   },
-  "host_permissions": ["<all_urls>"],
+
   "permissions": [
-    "nativeMessaging",
     "proxy",
     "storage",
-    "alarms",
     "tabs",
-    "scripting",
     "webRequest",
-    "webRequestAuthProvider"
+    "webRequestBlocking",
+    "<all_urls>",
+    "alarms",
+    "downloads",
+    "notifications"
   ],
-  "optional_permissions": ["browsingData", "privacy"]
+
+  "optional_permissions": ["browsingData", "privacy"],
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "vnproxy@eric.h.jung",
+      "strict_min_version": "93.0"
+    }
+  }
 }

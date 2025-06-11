@@ -41,8 +41,6 @@ const IS_FIREFOX =
   typeof browser !== "undefined" || navigator.userAgent.includes("Firefox");
 const IS_CHROME = !IS_FIREFOX;
 
-console.log("Background: Browser detected:", IS_FIREFOX ? "Firefox" : "Chrome");
-
 class AuthenticationManager {
   constructor() {
     this.credentials = [];
@@ -211,7 +209,6 @@ class ProxyRequestManager {
       await browserAPI.storage.local.set({
         [CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE]: isActive,
       });
-      console.log("Background: Firefox proxy state saved:", isActive);
     } catch (error) {
       console.error("Failed to save Firefox proxy state:", error);
     }
@@ -999,9 +996,7 @@ class MessageHandler {
                 [CONFIG.STORAGE_KEYS.TX_PROXY]: null,
               });
 
-              console.log(
-                "Background: Force disconnect completed successfully"
-              );
+           
             } catch (error) {
               console.error(
                 "Background: Error during force disconnect:",
@@ -1280,7 +1275,6 @@ class MainProxyManager {
         "autoChangeState",
       ]);
 
-      console.log("Background: Direct proxy set successfully");
       return true;
     } catch (error) {
       console.error("Error setting direct proxy:", error);
