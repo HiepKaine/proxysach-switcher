@@ -335,7 +335,6 @@ class ProxyRequestManager {
       console.error("ProxyRequestManager: Error clearing storage:", error);
     }
 
-    console.log("ProxyRequestManager: Proxy state cleared completely");
   }
 
   // NEW: Force refresh Firefox proxy state
@@ -616,7 +615,6 @@ class AutoChangeManager {
     this.lastChangeTime = now;
 
     try {
-      console.log("AutoChangeManager: Starting executeAutoChange");
       
       // FIXED: Thông báo cho popup về trạng thái protected
       this.sendToPopup("showProcessingNewIpConnect", {
@@ -625,7 +623,6 @@ class AutoChangeManager {
       });
 
       // Step 1: Disconnect proxy with verification
-      console.log("AutoChangeManager: Step 1 - Disconnecting proxy");
       const disconnectSuccess = await proxyManager.disconnectProxyOnly();
 
       if (!disconnectSuccess) {
@@ -635,7 +632,6 @@ class AutoChangeManager {
       }
 
       // Step 2: Verify proxy is truly disconnected with retries
-      console.log("AutoChangeManager: Step 2 - Verifying disconnection");
       const verifySuccess = await this.verifyProxyDisconnected();
 
       if (!verifySuccess) {
@@ -646,9 +642,7 @@ class AutoChangeManager {
 
       // Step 3: Wait for proxy state to settle
       const waitTime = IS_FIREFOX ? 2000 : 1000;
-      console.log(
-        `AutoChangeManager: Step 3 - Waiting ${waitTime}ms for proxy state to settle`
-      );
+    
       await this.sleep(waitTime);
 
       // Step 4: Double check config still exists after wait
@@ -659,14 +653,12 @@ class AutoChangeManager {
       }
 
       // Step 5: Call API to change IP
-      console.log("AutoChangeManager: Step 4 - Calling changeIP API");
       const result = await APIService.changeIP(
         this.config.apiKey,
         this.config.location
       );
 
       if (result && result.code === 200) {
-        console.log("AutoChangeManager: Step 5 - Setting up new proxy");
         await proxyManager.handleProxyResponse(
           result.data,
           this.config.apiKey,
@@ -683,9 +675,7 @@ class AutoChangeManager {
               nextChangeStartTime: Date.now(),
               nextChangeExpired: false,
             });
-            console.log(
-              `AutoChangeManager: Saved nextChangeIP timer: ${result.data.nextChangeIP} seconds`
-            );
+        
           } catch (error) {
             console.error(
               "AutoChangeManager: Error saving nextChangeIP timer:",
@@ -756,7 +746,6 @@ class AutoChangeManager {
       // FIXED: Clear protection flags
       this.isChangingIP = false;
       this.isProtected = false;
-      console.log("AutoChangeManager: executeAutoChange finished");
     }
   }
 
@@ -789,10 +778,7 @@ class AutoChangeManager {
 
   async verifyProxyDisconnected() {
     try {
-      console.log(
-        "AutoChangeManager: Starting proxy disconnection verification"
-      );
-
+   
       let attempts = 0;
       const maxAttempts = 10;
       const baseDelay = 200;
@@ -800,18 +786,7 @@ class AutoChangeManager {
       while (attempts < maxAttempts) {
         // Check internal proxy state
         const currentProxy = proxyRequestManager.getCurrentProxy();
-        console.log(
-          `AutoChangeManager: Verification attempt ${
-            attempts + 1
-          }/${maxAttempts}:`,
-          {
-            isActive: currentProxy.isActive,
-            mode: currentProxy.mode,
-            hasProxy: !!currentProxy.proxy,
-            isInitialized: currentProxy.isInitialized,
-            firefoxActive: currentProxy.firefoxProxyActive,
-          }
-        );
+     
 
         // FIXED: More comprehensive proxy state checking
         const isProxyActive =
@@ -821,17 +796,12 @@ class AutoChangeManager {
           (IS_FIREFOX && currentProxy.firefoxProxyActive);
 
         if (!isProxyActive) {
-          console.log("AutoChangeManager: Proxy successfully disconnected");
           return true;
         }
 
         // If still active, try to clear again
         if (attempts < maxAttempts - 1) {
-          console.log(
-            `AutoChangeManager: Proxy still active, clearing again (attempt ${
-              attempts + 1
-            })`
-          );
+      
 
           // Clear with increasing delay
           await proxyRequestManager.clearProxy();
@@ -1250,9 +1220,7 @@ class MessageHandler {
 
   // NEW: Non-invasive proxy info retrieval
   async getCurrentProxyNoChange(apiKey, proxyType, preserveTimer = false) {
-    console.log(
-      "Background: getCurrentProxyNoChange - UI refresh only, no disconnect"
-    );
+ 
 
     this.sendToPopup("processingGetProxyInfo", {});
 
@@ -1498,10 +1466,7 @@ class MainProxyManager {
     proxyType,
     preserveTimer = false
   ) {
-    console.log(
-      "Background: handleProxyResponseNoChange - processing for UI only"
-    );
-
+ 
     if (!response?.ipv4 && !response?.ipv6) {
       const error =
         response?.code === 500
@@ -1535,9 +1500,7 @@ class MainProxyManager {
         preserveTimer: preserveTimer,
       });
 
-      console.log(
-        "Background: Proxy info updated for UI refresh without changing connection"
-      );
+   
     } catch (error) {
       console.error(
         "Background: Error updating proxy info for UI refresh:",
@@ -1614,7 +1577,6 @@ class MainProxyManager {
 
   async disconnectProxyOnly() {
     try {
-      console.log("MainProxyManager: Starting disconnectProxyOnly");
 
       // Clear internal proxy settings with proper sequencing
       await this.requestManager.clearProxy();
@@ -1633,16 +1595,12 @@ class MainProxyManager {
 
           const state = await this.requestManager.loadFirefoxProxyState();
           if (!state) {
-            console.log(
-              "MainProxyManager: Firefox proxy state cleared successfully"
-            );
+          
             break;
           }
 
           attempts++;
-          console.log(
-            `MainProxyManager: Firefox clear attempt ${attempts}/${maxAttempts}`
-          );
+          
         }
       }
 
@@ -1657,12 +1615,6 @@ class MainProxyManager {
 
       // Verify final state
       const finalState = this.requestManager.getCurrentProxy();
-      console.log("MainProxyManager: Final proxy state after disconnect:", {
-        isActive: finalState.isActive,
-        mode: finalState.mode,
-        hasProxy: !!finalState.proxy,
-        firefoxActive: finalState.firefoxProxyActive,
-      });
 
       return !finalState.isActive; // Return true if successfully disconnected
     } catch (error) {
