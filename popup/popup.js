@@ -450,7 +450,6 @@ class MessageHandler {
       ]);
 
       if (status && (status.isChangingIP || status.isProtected)) {
-     
         return null;
       }
 
@@ -705,7 +704,6 @@ class TimerManager {
   // FIXED: New method that actually triggers IP change when timer expires
   async handleTimerExpiredWithActualChange() {
     try {
-
       // Get current settings for the IP change
       const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
       const proxyType =
@@ -740,7 +738,6 @@ class TimerManager {
         POPUP_CONFIG.BACKGROUND_MESSAGES.AUTO_CHANGE_IP,
         config
       );
-
     } catch (error) {
       console.error("Popup: Error during timer expired IP change:", error);
       await this.resetToDefaultTime();
@@ -912,7 +909,6 @@ class TimerManager {
       return;
     }
 
-
     // Calculate target timestamp
     const now = Date.now();
     const targetTime = now + targetSeconds * 1000;
@@ -988,7 +984,7 @@ class TimerManager {
     }
 
     // Start countdown with remaining time
-  
+
     this.startCountDown(timerData.remainingSeconds);
     return true;
   }
@@ -1157,8 +1153,6 @@ class LocationManager {
       );
 
       if (status && (status.isChangingIP || status.isProtected)) {
-    
-
         // FIXED: Thử load từ cache thay vì chờ
         const cachedProxyInfo = StorageManager.getCachedProxyInfo();
         if (cachedProxyInfo && !cachedProxyInfo.expired) {
@@ -1250,8 +1244,6 @@ class LocationManager {
 
             // FIXED: Nếu API call thất bại, không disconnect
             if (!apiResponse) {
-          
-
               // Hiển thị trạng thái connected nhưng chưa có info
               const statusElement = document.getElementById(
                 POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
@@ -1317,11 +1309,8 @@ class LocationManager {
         const remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
 
         if (remainingSeconds > 0) {
-       
-          setTimeout(() => {
-            timerManager.setCountDowntime(remainingSeconds);
-            timerManager.startCountDown();
-          }, 1000);
+          timerManager.setCountDowntime(remainingSeconds + 1);
+          timerManager.startCountDown();
           return true;
         } else {
           // Timer đã hết hạn, đánh dấu expired
@@ -1342,7 +1331,6 @@ class LocationManager {
 
   static async forceDisconnectProxy(reason = "Unknown") {
     try {
-
       // Stop all timers first
       timerManager.forceStopAll();
 
@@ -1520,7 +1508,6 @@ class UIManager {
     statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
 
     // CRITICAL FIX: Enhanced timer handling logic
- 
 
     // First, try to restore any existing countdown timer
     const restored = timerManager.restoreCountDown();
@@ -1538,13 +1525,11 @@ class UIManager {
         const wasExpired = StorageManager.wasNextChangeTimerExpired();
 
         if (wasExpired) {
-        
           document.getElementById(
             POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
           ).innerText = "0 s";
         } else {
-       
-          timerManager.setCountDowntime(proxyInfo.nextChangeIP);
+          timerManager.setCountDowntime(proxyInfo.nextChangeIP + 1);
           timerManager.startCountDown();
         }
       } else {
@@ -1553,7 +1538,6 @@ class UIManager {
           "0 s";
       }
     } else {
-    
     }
   }
 
@@ -2037,7 +2021,6 @@ class ProxyManager {
         // This is fresh data from API, so clear any previous timer expiry state
         const wasExpired = StorageManager.wasNextChangeTimerExpired();
         if (wasExpired) {
-       
           StorageManager.clearNextChangeTimer();
         }
       }
@@ -2248,7 +2231,6 @@ class AppInitializer {
         backgroundStatus &&
         (backgroundStatus.isChangingIP || backgroundStatus.isProtected)
       ) {
-      
         UIManager.showProcessingNewIpConnectProtected();
 
         // Wait for protection to clear, then continue initialization
