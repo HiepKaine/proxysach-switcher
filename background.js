@@ -536,6 +536,8 @@ class AutoChangeManager {
     this.changeDebounce = 3000;
     this.startTime = 0;
     this.lastUpdateTime = 0;
+    // NEW: Protection flag để tránh conflict
+    this.isProtected = false;
   }
 
   async start(config) {
@@ -608,12 +610,19 @@ class AutoChangeManager {
     const now = Date.now();
     if (now - this.lastChangeTime < this.changeDebounce) return;
 
+    // FIXED: Set protection flags
     this.isChangingIP = true;
+    this.isProtected = true;
     this.lastChangeTime = now;
 
     try {
       console.log("AutoChangeManager: Starting executeAutoChange");
-      this.sendToPopup("showProcessingNewIpConnect", {});
+      
+      // FIXED: Thông báo cho popup về trạng thái protected
+      this.sendToPopup("showProcessingNewIpConnect", {
+        isAutoChanging: true,
+        isProtected: true
+      });
 
       // Step 1: Disconnect proxy with verification
       console.log("AutoChangeManager: Step 1 - Disconnecting proxy");
@@ -636,7 +645,7 @@ class AutoChangeManager {
       }
 
       // Step 3: Wait for proxy state to settle
-      const waitTime = IS_FIREFOX ? 2000 : 1000; // Reduced wait time since we have verification
+      const waitTime = IS_FIREFOX ? 2000 : 1000;
       console.log(
         `AutoChangeManager: Step 3 - Waiting ${waitTime}ms for proxy state to settle`
       );
@@ -664,27 +673,43 @@ class AutoChangeManager {
           this.config.proxyType
         );
 
-        // Force refresh Firefox state after successful change
-        if (IS_FIREFOX) {
-          await proxyRequestManager.forceRefreshFirefoxState();
-          await this.sleep(300);
+        // FIXED: Lưu nextChangeIP vào storage ngay khi change IP thành công
+        if (result.data.nextChangeIP && result.data.nextChangeIP > 0) {
+          try {
+            const targetTime = Date.now() + result.data.nextChangeIP * 1000;
+            await browserAPI.storage.local.set({
+              nextChangeTarget: targetTime,
+              nextChangeDuration: result.data.nextChangeIP,
+              nextChangeStartTime: Date.now(),
+              nextChangeExpired: false,
+            });
+            console.log(
+              `AutoChangeManager: Saved nextChangeIP timer: ${result.data.nextChangeIP} seconds`
+            );
+          } catch (error) {
+            console.error(
+              "AutoChangeManager: Error saving nextChangeIP timer:",
+              error
+            );
+          }
         }
 
-        // Reset timer
+        // Reset auto change timer
         this.remainingTime = this.originalDuration;
         this.startTime = Date.now();
         this.lastUpdateTime = Date.now();
         await this.saveState();
 
-        this.sendToPopup("successGetProxyInfo", result.data);
+        // FIXED: Send success with protection info
+        this.sendToPopup("successGetProxyInfo", {
+          ...result.data,
+          isAutoChanging: false,
+          isProtected: false
+        });
 
         if (this.isRunning) {
           this.scheduleTimer();
         }
-
-        console.log(
-          "AutoChangeManager: executeAutoChange completed successfully"
-        );
       } else {
         console.error("AutoChangeManager: API call failed:", result);
         const error =
@@ -728,9 +753,38 @@ class AutoChangeManager {
         this.scheduleTimer();
       }
     } finally {
+      // FIXED: Clear protection flags
       this.isChangingIP = false;
+      this.isProtected = false;
       console.log("AutoChangeManager: executeAutoChange finished");
     }
+  }
+
+  // NEW: Check if auto change is in protected state
+  isInProtectedState() {
+    return this.isChangingIP || this.isProtected;
+  }
+
+  // ENHANCED: getStatus with protection info
+  getStatus() {
+    return {
+      isActive: this.isRunning,
+      remainingTime: this.remainingTime,
+      originalDuration: this.originalDuration,
+      isChangingIP: this.isChangingIP,
+      isProtected: this.isProtected, // NEW
+      config: this.config
+        ? {
+            hasApiKey: !!this.config.apiKey,
+            location: this.config.location,
+            timeAutoChangeIP: this.config.timeAutoChangeIP,
+          }
+        : null,
+      lastChangeTime: this.lastChangeTime,
+      startTime: this.startTime,
+      lastUpdateTime: this.lastUpdateTime,
+      currentTime: Date.now(),
+    };
   }
 
   async verifyProxyDisconnected() {
@@ -740,8 +794,8 @@ class AutoChangeManager {
       );
 
       let attempts = 0;
-      const maxAttempts = 10; // Increased attempts
-      const baseDelay = 200; // Base delay between attempts
+      const maxAttempts = 10;
+      const baseDelay = 200;
 
       while (attempts < maxAttempts) {
         // Check internal proxy state
@@ -773,7 +827,6 @@ class AutoChangeManager {
 
         // If still active, try to clear again
         if (attempts < maxAttempts - 1) {
-          // Don't clear on last attempt
           console.log(
             `AutoChangeManager: Proxy still active, clearing again (attempt ${
               attempts + 1
@@ -836,6 +889,7 @@ class AutoChangeManager {
         startTime: this.startTime,
         lastUpdateTime: this.lastUpdateTime,
         isChangingIP: this.isChangingIP,
+        isProtected: this.isProtected, // NEW
         version: Date.now(),
       };
 
@@ -870,6 +924,7 @@ class AutoChangeManager {
           this.config = state.config;
           this.startTime = state.startTime;
           this.isChangingIP = state.isChangingIP || false;
+          this.isProtected = state.isProtected || false; // NEW
 
           this.remainingTime = Math.max(
             0,
@@ -897,26 +952,6 @@ class AutoChangeManager {
     return false;
   }
 
-  getStatus() {
-    return {
-      isActive: this.isRunning,
-      remainingTime: this.remainingTime,
-      originalDuration: this.originalDuration,
-      isChangingIP: this.isChangingIP,
-      config: this.config
-        ? {
-            hasApiKey: !!this.config.apiKey,
-            location: this.config.location,
-            timeAutoChangeIP: this.config.timeAutoChangeIP,
-          }
-        : null,
-      lastChangeTime: this.lastChangeTime,
-      startTime: this.startTime,
-      lastUpdateTime: this.lastUpdateTime,
-      currentTime: Date.now(),
-    };
-  }
-
   async clearState() {
     try {
       await browserAPI.storage.local.remove(["autoChangeState"]);
@@ -940,6 +975,7 @@ class AutoChangeManager {
     this.originalDuration = 0;
     this.config = null;
     this.isChangingIP = false;
+    this.isProtected = false; // NEW
     this.lastUpdateTime = 0;
     this.lastChangeTime = 0;
     this.startTime = 0;
@@ -1214,8 +1250,10 @@ class MessageHandler {
 
   // NEW: Non-invasive proxy info retrieval
   async getCurrentProxyNoChange(apiKey, proxyType, preserveTimer = false) {
-    console.log("Background: getCurrentProxyNoChange - UI refresh only, no disconnect");
-    
+    console.log(
+      "Background: getCurrentProxyNoChange - UI refresh only, no disconnect"
+    );
+
     this.sendToPopup("processingGetProxyInfo", {});
 
     try {
@@ -1223,8 +1261,8 @@ class MessageHandler {
       if (result?.code === 200) {
         // CRITICAL: Use non-invasive proxy response handling
         await proxyManager.handleProxyResponseNoChange(
-          result.data, 
-          apiKey, 
+          result.data,
+          apiKey,
           proxyType,
           preserveTimer
         );
@@ -1454,9 +1492,16 @@ class MainProxyManager {
   }
 
   // NEW: Non-invasive proxy response handling for UI refresh
-  async handleProxyResponseNoChange(response, apiKey, proxyType, preserveTimer = false) {
-    console.log("Background: handleProxyResponseNoChange - processing for UI only");
-    
+  async handleProxyResponseNoChange(
+    response,
+    apiKey,
+    proxyType,
+    preserveTimer = false
+  ) {
+    console.log(
+      "Background: handleProxyResponseNoChange - processing for UI only"
+    );
+
     if (!response?.ipv4 && !response?.ipv6) {
       const error =
         response?.code === 500
@@ -1487,12 +1532,17 @@ class MainProxyManager {
       // Send to popup with preserve timer flag
       messageHandler.sendToPopup("successGetProxyInfo", {
         ...proxyInfo,
-        preserveTimer: preserveTimer
+        preserveTimer: preserveTimer,
       });
 
-      console.log("Background: Proxy info updated for UI refresh without changing connection");
+      console.log(
+        "Background: Proxy info updated for UI refresh without changing connection"
+      );
     } catch (error) {
-      console.error("Background: Error updating proxy info for UI refresh:", error);
+      console.error(
+        "Background: Error updating proxy info for UI refresh:",
+        error
+      );
       messageHandler.sendToPopup("failureGetProxyInfo", {
         error: CONFIG.ERRORS.UNKNOWN_ERROR,
       });

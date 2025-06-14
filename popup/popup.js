@@ -332,6 +332,7 @@ class ChromeStorageManager {
   }
 }
 
+// Thêm vào MessageHandler.setupMessageListener()
 class MessageHandler {
   static async sendToBackground(message, data = {}) {
     try {
@@ -385,7 +386,6 @@ class MessageHandler {
       return null;
     }
   }
-
   static setupMessageListener() {
     browserAPI.runtime.onMessage.addListener((request) => {
       switch (request.greeting) {
@@ -396,18 +396,24 @@ class MessageHandler {
           UIManager.showProcessingConnect();
           break;
         case POPUP_CONFIG.MESSAGES.SHOW_PROCESSING_NEW_IP_CONNECT:
-          UIManager.showProcessingNewIpConnect();
+          // FIXED: Handle auto change protection
+          if (request.data?.isAutoChanging && request.data?.isProtected) {
+            UIManager.showProcessingNewIpConnectProtected();
+          } else {
+            UIManager.showProcessingNewIpConnect();
+          }
           break;
         case POPUP_CONFIG.MESSAGES.FAILURE_GET_PROXY_INFO:
           UIManager.showError(request);
-          setTimeout(async () => {
-            await LocationManager.forceDisconnectProxy(
-              `API failure: ${request.data?.error || "Unknown error"}`
-            );
-          }, 2000);
+          // FIXED: Không tự động disconnect khi có lỗi API
+          console.log("Popup: API error received, but NOT auto-disconnecting");
           break;
         case POPUP_CONFIG.MESSAGES.SUCCESS_GET_PROXY_INFO:
-          ProxyManager.handleSuccessfulConnection(request.data);
+          // FIXED: Handle protected success response
+          const preserveTimer = request.data?.preserveTimer || false;
+          // Remove preserveTimer from data before passing to handler
+          const { preserveTimer: _, ...cleanData } = request.data || {};
+          ProxyManager.handleSuccessfulConnection(cleanData, preserveTimer);
           break;
         case POPUP_CONFIG.MESSAGES.SUCCESS_GET_INFO_KEY:
           ProxyManager.handleInfoKeySuccess(request.data);
@@ -420,7 +426,6 @@ class MessageHandler {
     });
   }
 
-  // FIXED: Add method to check background connection
   static async checkBackgroundConnection() {
     try {
       const response = await Promise.race([
@@ -434,6 +439,32 @@ class MessageHandler {
     } catch (error) {
       console.error("Popup: Background connection check failed:", error);
       return false;
+    }
+  }
+
+  // ENHANCED: Check background protection status before sending requests
+  static async sendToBackgroundSafe(message, data = {}) {
+    try {
+      // Check if auto change is in protected state với timeout ngắn
+      const status = await Promise.race([
+        this.sendToBackground("getBackgroundTimerStatus"),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Status check timeout")), 1000)
+        ),
+      ]);
+
+      if (status && (status.isChangingIP || status.isProtected)) {
+        console.log(
+          "Popup: Background is in protected state, skipping request:",
+          message
+        );
+        return null;
+      }
+
+      return await this.sendToBackground(message, data);
+    } catch (error) {
+      console.error("Popup: Error in sendToBackgroundSafe:", error);
+      return null;
     }
   }
 }
@@ -683,11 +714,14 @@ class TimerManager {
   async handleTimerExpiredWithActualChange() {
     try {
       console.log("Popup: Auto change IP timer expired - triggering IP change");
-      
+
       // Get current settings for the IP change
       const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
-      const proxyType = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_TYPE) || "ipv4";
-      const location = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT)?.value;
+      const proxyType =
+        StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_TYPE) || "ipv4";
+      const location = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
+      )?.value;
 
       if (!apiKey) {
         console.error("Popup: No API key available for auto IP change");
@@ -699,7 +733,10 @@ class TimerManager {
       const config = {
         apiKey: apiKey,
         isAutoChangeIP: true,
-        timeAutoChangeIP: StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT) || "60",
+        timeAutoChangeIP:
+          StorageManager.get(
+            POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
+          ) || "60",
         proxyType: proxyType,
       };
 
@@ -714,7 +751,6 @@ class TimerManager {
       );
 
       console.log("Popup: Auto change IP request sent to background");
-
     } catch (error) {
       console.error("Popup: Error during timer expired IP change:", error);
       await this.resetToDefaultTime();
@@ -1009,6 +1045,75 @@ class TimerManager {
 }
 
 class LocationManager {
+  static async getProxyInfoIfConnectedSafeNoAPI(preserveTimer = false) {
+    const proxyConnected = StorageManager.get(
+      POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
+    );
+
+    if (proxyConnected === "true") {
+      const cachedProxyInfo = StorageManager.getCachedProxyInfo();
+
+      if (cachedProxyInfo) {
+        if (cachedProxyInfo.expired) {
+          const statusElement = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+          );
+          if (statusElement) {
+            statusElement.innerText = cachedProxyInfo.error;
+            statusElement.classList.remove(
+              POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
+            );
+            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+          }
+
+          // FIXED: Không tự động disconnect, chỉ hiển thị lỗi
+          return;
+        }
+
+        UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
+        ProxyManager.updateProxyUIStatus();
+
+        if (cachedProxyInfo.location) {
+          const locationSelect = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
+          );
+          if (locationSelect) {
+            locationSelect.value = cachedProxyInfo.location;
+          }
+        }
+
+        // FIXED: Restore nextChangeIP from background storage
+        await this.restoreNextChangeIPFromBackground();
+        return;
+      } else {
+        // FIXED: Nếu không có cached data, hiển thị loading và KHÔNG gọi API
+        console.log("Popup: No cached proxy info, showing loading state");
+        UIManager.showLoadingProxyInfo();
+
+        // FIXED: Thử restore nextChangeIP từ background trước
+        const restored = await this.restoreNextChangeIPFromBackground();
+
+        if (!restored) {
+          // Nếu không restore được, hiển thị connected nhưng chưa có info
+          const statusElement = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+          );
+          if (statusElement) {
+            statusElement.innerText = "• Đã kết nối (chưa có thông tin)";
+            statusElement.classList.remove(
+              POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER
+            );
+            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
+          }
+        }
+        return;
+      }
+    } else {
+      UIManager.setNotConnectedStatus();
+      StorageManager.clearCachedProxyInfo();
+    }
+  }
+
   // ENHANCED: Load from cache or API
   static async loadLocations() {
     // First, try to load from cache
@@ -1065,17 +1170,51 @@ class LocationManager {
     }
   }
 
-  // FIXED: Load proxy info from cache, use non-invasive background call
+  static async getProxyInfoIfConnectedSafe(preserveTimer = false) {
+    try {
+      // Check if background is in protected state
+      const status = await MessageHandler.sendToBackground(
+        "getBackgroundTimerStatus"
+      );
+
+      if (status && (status.isChangingIP || status.isProtected)) {
+        console.log(
+          "Popup: Background is in protected state, skipping API call"
+        );
+
+        // FIXED: Thử load từ cache thay vì chờ
+        const cachedProxyInfo = StorageManager.getCachedProxyInfo();
+        if (cachedProxyInfo && !cachedProxyInfo.expired) {
+          UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
+          await this.restoreNextChangeIPFromBackground();
+        }
+        return;
+      }
+
+      await this.getProxyInfoIfConnected(preserveTimer);
+    } catch (error) {
+      console.error(
+        "LocationManager: Error in getProxyInfoIfConnectedSafe:",
+        error
+      );
+
+      // FIXED: Không gọi getProxyInfoIfConnected nếu có lỗi, thay vào đó dùng cache
+      const cachedProxyInfo = StorageManager.getCachedProxyInfo();
+      if (cachedProxyInfo && !cachedProxyInfo.expired) {
+        UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
+        await this.restoreNextChangeIPFromBackground();
+      }
+    }
+  }
+
   static async getProxyInfoIfConnected(preserveTimer = false) {
     const proxyConnected = StorageManager.get(
       POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
     );
-      console.log('proxyConnected', proxyConnected);
 
     if (proxyConnected === "true") {
       const cachedProxyInfo = StorageManager.getCachedProxyInfo();
-      console.log('cachedProxyInfo', cachedProxyInfo);
-      
+
       if (cachedProxyInfo) {
         if (cachedProxyInfo.expired) {
           const statusElement = document.getElementById(
@@ -1089,8 +1228,7 @@ class LocationManager {
             statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
           }
 
-          await this.forceDisconnectProxy("Expiration detected");
-
+          // FIXED: Chỉ hiển thị lỗi, không tự động disconnect
           return;
         }
 
@@ -1106,6 +1244,8 @@ class LocationManager {
           }
         }
 
+        // FIXED: Restore nextChangeIP from background storage
+        await this.restoreNextChangeIPFromBackground();
         return;
       } else {
         const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
@@ -1115,17 +1255,64 @@ class LocationManager {
         if (apiKey) {
           UIManager.showLoadingProxyInfo();
           try {
-            await MessageHandler.sendToBackground(
-              POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY_NO_CHANGE,
-              {
-                apiKey: apiKey,
-                proxyType: proxyType,
-                preserveTimer: preserveTimer,
-                onlyGetInfo: true, 
+            // FIXED: Sử dụng safe API call với timeout ngắn hơn
+            const apiResponse = await Promise.race([
+              MessageHandler.sendToBackgroundSafe(
+                POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY_NO_CHANGE,
+                {
+                  apiKey: apiKey,
+                  proxyType: proxyType,
+                  preserveTimer: preserveTimer,
+                  onlyGetInfo: true,
+                }
+              ),
+              new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("API timeout")), 3000)
+              ),
+            ]);
+
+            // FIXED: Nếu API call thất bại, không disconnect
+            if (!apiResponse) {
+              console.log(
+                "Popup: API call failed or returned null, keeping connection"
+              );
+
+              // Hiển thị trạng thái connected nhưng chưa có info
+              const statusElement = document.getElementById(
+                POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+              );
+              if (statusElement) {
+                statusElement.innerText = "• Đã kết nối (API không phản hồi)";
+                statusElement.classList.remove(
+                  POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER
+                );
+                statusElement.classList.add(
+                  POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
+                );
               }
-            );
+
+              // Thử restore nextChangeIP từ background
+              await this.restoreNextChangeIPFromBackground();
+            }
           } catch (error) {
-            await this.forceDisconnectProxy("API error");
+            console.error("Popup: API error:", error);
+
+            // FIXED: Không disconnect khi có lỗi API
+            const statusElement = document.getElementById(
+              POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+            );
+            if (statusElement) {
+              statusElement.innerText = "• Đã kết nối (lỗi tải thông tin)";
+              statusElement.classList.remove(
+                POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER
+              );
+              statusElement.classList.add(
+                POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
+              );
+            }
+
+            // Thử restore nextChangeIP từ background
+            await this.restoreNextChangeIPFromBackground();
           }
         } else {
           UIManager.setNotConnectedStatus();
@@ -1139,6 +1326,45 @@ class LocationManager {
     }
   }
 
+  // NEW: Restore nextChangeIP from background storage
+  static async restoreNextChangeIPFromBackground() {
+    try {
+      const result = await browserAPI.storage.local.get([
+        "nextChangeTarget",
+        "nextChangeDuration",
+        "nextChangeStartTime",
+        "nextChangeExpired",
+      ]);
+
+      if (result.nextChangeTarget && !result.nextChangeExpired) {
+        const now = Date.now();
+        const remainingMs = result.nextChangeTarget - now;
+        const remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
+
+        if (remainingSeconds > 0) {
+          console.log(
+            `Popup: Restoring nextChangeIP timer with ${remainingSeconds} seconds from background`
+          );
+          timerManager.setCountDowntime(remainingSeconds);
+          timerManager.startCountDown();
+          return true;
+        } else {
+          // Timer đã hết hạn, đánh dấu expired
+          await browserAPI.storage.local.set({ nextChangeExpired: true });
+          document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
+          ).innerText = "0 s";
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Popup: Error restoring nextChangeIP from background:",
+        error
+      );
+    }
+    return false;
+  }
+
   static async forceDisconnectProxy(reason = "Unknown") {
     try {
       console.log(`Popup: Force disconnecting proxy - Reason: ${reason}`);
@@ -1149,7 +1375,7 @@ class LocationManager {
       // Clear all local storage
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
       StorageManager.clearCachedProxyInfo();
-      StorageManager.clearCachedLocations();
+      // StorageManager.clearCachedLocations();
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
@@ -1246,6 +1472,21 @@ class LocationManager {
 }
 
 class UIManager {
+  static showProcessingNewIpConnectProtected() {
+    document.getElementById(POPUP_CONFIG.UI_ELEMENTS.IP_INFO).style.display =
+      null;
+    const statusElement = document.getElementById(
+      POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+    );
+    statusElement.innerText = "• Đang tự động đổi IP...";
+    statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+    statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
+
+    // Disable buttons during auto change
+    this.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
+    this.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT);
+  }
+
   static showProcessingConnect() {
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.IP_INFO).style.display =
       null;
@@ -1882,7 +2123,7 @@ class ProxyManager {
 
     // ENHANCED: Clear cached proxy info and locations
     StorageManager.clearCachedProxyInfo();
-    StorageManager.clearCachedLocations();
+    // StorageManager.clearCachedLocations();
 
     // ENHANCED: Clear nextTimeChange state
     timerManager.clearNextTimeChangeState();
@@ -2014,28 +2255,72 @@ class AppInitializer {
       timerManager.forceStopAll();
 
       UIManager.setNotConnectedStatus();
-      const isBackgroundConnected =
-        await MessageHandler.checkBackgroundConnection();
 
-      if (!isBackgroundConnected) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-
-        const retryConnection =
-          await MessageHandler.checkBackgroundConnection();
-        if (!retryConnection) {
-          const statusElement = document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-          );
-          if (statusElement) {
-            statusElement.innerText =
-              "• Extension lỗi kết nối, vui lòng thử lại";
-            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-          }
-          return;
-        }
+      // FIXED: Đơn giản hóa background connection check
+      let isBackgroundConnected = false;
+      try {
+        const response = await MessageHandler.sendToBackground("ping");
+        isBackgroundConnected = response && response.pong;
+      } catch (error) {
+        console.error("Popup: Background connection failed:", error);
       }
 
-      // ENHANCED: Load locations from cache or API
+      if (!isBackgroundConnected) {
+        const statusElement = document.getElementById(
+          POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+        );
+        if (statusElement) {
+          statusElement.innerText = "• Extension lỗi kết nối, vui lòng thử lại";
+          statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+        }
+        return;
+      }
+
+      // FIXED: Check protection status trước khi làm gì khác
+      let backgroundStatus = null;
+      try {
+        backgroundStatus = await MessageHandler.sendToBackground(
+          "getBackgroundTimerStatus"
+        );
+      } catch (error) {
+        console.error("Popup: Failed to get background status:", error);
+      }
+
+      if (
+        backgroundStatus &&
+        (backgroundStatus.isChangingIP || backgroundStatus.isProtected)
+      ) {
+        console.log(
+          "Popup: Background is in protected state, showing protected UI"
+        );
+        UIManager.showProcessingNewIpConnectProtected();
+
+        // Wait for protection to clear, then continue initialization
+        setTimeout(async () => {
+          await this.continueInitialization();
+        }, 3000);
+        return;
+      }
+
+      await this.continueInitialization();
+    } catch (error) {
+      console.error("AppInitializer: Initialization error:", error);
+      const statusElement = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+      );
+      if (statusElement) {
+        statusElement.innerText = "• Initialization Error";
+        statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+      }
+    } finally {
+      this.isInitializing = false;
+    }
+  }
+
+  // FIXED: Cải thiện continueInitialization
+  static async continueInitialization() {
+    try {
+      // Load locations from cache or API
       await LocationManager.loadLocations();
 
       const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
@@ -2056,6 +2341,7 @@ class AppInitializer {
 
       let timerInitialized = false;
 
+      // FIXED: Khởi tạo timer trước
       if (
         proxyConnected === "true" &&
         JSON.parse(isAutoChangeIP) &&
@@ -2067,20 +2353,14 @@ class AppInitializer {
         }
       }
 
-      // FIXED: Always check for cached proxy info when proxy is connected, using preserveTimer flag
+      // FIXED: Chỉ load proxy info nếu connected, không gọi API nếu không cần thiết
       if (proxyConnected === "true") {
-        await LocationManager.getProxyInfoIfConnected(timerInitialized);
+        await LocationManager.getProxyInfoIfConnectedSafeNoAPI(
+          timerInitialized
+        );
       }
     } catch (error) {
-      const statusElement = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-      );
-      if (statusElement) {
-        statusElement.innerText = "• Initialization Error";
-        statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-      }
-    } finally {
-      this.isInitializing = false;
+      console.error("AppInitializer: Error in continueInitialization:", error);
     }
   }
 }
