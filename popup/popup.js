@@ -9,7 +9,6 @@ const POPUP_CONFIG = {
     IS_AUTO_CHANGE_IP: "isAutoChangeIP",
     TIME_AUTO_CHANGE_IP: "timeAutoChangeIP",
     TIME_AUTO_CHANGE_IP_DEFAULT: "timeAutoChangeIPDefault",
-    TIME_AUTO_CHANGE_IP_2: "timeAutoChangeIP2",
     PROXY_CONNECTED: "proxyConnected",
     TX_CONF: "tx_conf",
     TX_PROXY: "tx_proxy",
@@ -30,7 +29,6 @@ const POPUP_CONFIG = {
   BACKGROUND_MESSAGES: {
     GET_LOCATIONS_DATA: "getLocationsData",
     GET_CURRENT_PROXY: "getCurrentProxy",
-    GET_CURRENT_PROXY_NO_CHANGE: "getCurrentProxyNoChange", // NEW: Non-invasive proxy info
     CHANGE_IP: "changeIp",
     AUTO_CHANGE_IP: "autoChangeIp",
     CANCEL_ALL: "cancelALL",
@@ -329,7 +327,6 @@ class ChromeStorageManager {
   }
 }
 
-// Thêm vào MessageHandler.setupMessageListener()
 class MessageHandler {
   static async sendToBackground(message, data = {}) {
     try {
@@ -383,6 +380,7 @@ class MessageHandler {
       return null;
     }
   }
+
   static setupMessageListener() {
     browserAPI.runtime.onMessage.addListener((request) => {
       switch (request.greeting) {
@@ -393,7 +391,6 @@ class MessageHandler {
           UIManager.showProcessingConnect();
           break;
         case POPUP_CONFIG.MESSAGES.SHOW_PROCESSING_NEW_IP_CONNECT:
-          // FIXED: Handle auto change protection
           if (request.data?.isAutoChanging && request.data?.isProtected) {
             UIManager.showProcessingNewIpConnectProtected();
           } else {
@@ -402,13 +399,24 @@ class MessageHandler {
           break;
         case POPUP_CONFIG.MESSAGES.FAILURE_GET_PROXY_INFO:
           UIManager.showError(request);
-          // FIXED: Không tự động disconnect khi có lỗi API
           break;
         case POPUP_CONFIG.MESSAGES.SUCCESS_GET_PROXY_INFO:
-          // FIXED: Handle protected success response
           const preserveTimer = request.data?.preserveTimer || false;
-          // Remove preserveTimer from data before passing to handler
-          const { preserveTimer: _, ...cleanData } = request.data || {};
+          const updateCache = request.data?.updateCache || false;
+          const cacheSource = request.data?.cacheSource || "background";
+
+          const {
+            preserveTimer: _,
+            updateCache: __,
+            cacheSource: ___,
+            ...cleanData
+          } = request.data || {};
+
+          if (updateCache) {
+            cleanData.updateCache = true;
+            cleanData.cacheSource = cacheSource;
+          }
+
           ProxyManager.handleSuccessfulConnection(cleanData, preserveTimer);
           break;
         case POPUP_CONFIG.MESSAGES.SUCCESS_GET_INFO_KEY:
@@ -420,6 +428,36 @@ class MessageHandler {
         default:
       }
     });
+
+    // NEW: Add chrome storage listener for cache sync
+    if (browserAPI.storage && browserAPI.storage.onChanged) {
+      browserAPI.storage.onChanged.addListener((changes, namespace) => {
+        if (namespace === "sync" && changes.cacheUpdateFlag) {
+          const cacheUpdate = changes.cacheUpdateFlag.newValue;
+
+          if (cacheUpdate && cacheUpdate.proxyInfo && cacheUpdate.timestamp) {
+            const now = Date.now();
+            const updateAge = now - cacheUpdate.timestamp;
+
+            if (updateAge < 5000) {
+              console.log(
+                `Popup: Received cache update from ${cacheUpdate.source}`
+              );
+              StorageManager.setCachedProxyInfo(cacheUpdate.proxyInfo);
+
+              const proxyConnected = StorageManager.get(
+                POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
+              );
+
+              if (proxyConnected === "true") {
+                UIManager.showProxyInfo(cacheUpdate.proxyInfo, false, true);
+                ProxyManager.updateProxyUIStatus();
+              }
+            }
+          }
+        }
+      });
+    }
   }
 
   static async checkBackgroundConnection() {
@@ -475,29 +513,34 @@ class TimerManager {
     this.notificationDebounceTime = 2000;
     this.syncCheckInterval = null;
     this.isInitialized = false;
+    // NEW: Add protection flags
+    this.isProcessingExpiredTimer = false;
+    this.lastExpiredProcessTime = 0;
   }
 
+  // ENHANCED: Better sync with background
   async syncWithBackground() {
     try {
-      const response = await browserAPI.runtime.sendMessage({
-        greeting: "getBackgroundTimerStatus",
-        data: {},
-      });
+      const response = await Promise.race([
+        browserAPI.runtime.sendMessage({
+          greeting: "getBackgroundTimerStatus",
+          data: {},
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Sync timeout")), 3000)
+        )
+      ]);
 
       if (response && response.isActive) {
-        if (response.isChangingIP) {
+        if (response.isChangingIP || response.isProtected) {
           return { status: "changing", data: response };
         }
 
         // Calculate accurate remaining time
         const now = Date.now();
-        const timeSinceLastUpdate = Math.floor(
-          (now - response.lastUpdateTime) / 1000
-        );
-        const realRemainingTime = Math.max(
-          0,
-          response.remainingTime - timeSinceLastUpdate
-        );
+        const timeSinceLastUpdate = Math.floor((now - response.lastUpdateTime) / 1000);
+        const realRemainingTime = Math.max(0, response.remainingTime - timeSinceLastUpdate);
+        
         return {
           status: "success",
           remainingTime: realRemainingTime,
@@ -507,11 +550,19 @@ class TimerManager {
         return { status: "inactive" };
       }
     } catch (error) {
+      console.error("TimerManager: Sync with background failed:", error);
       return { status: "error" };
     }
   }
 
+  // ENHANCED: Better countdown management
   startTimeChangeCountdownWithTime(confirmedTime) {
+    // CRITICAL FIX: Prevent starting countdown if background is in protected state
+    if (this.isProcessingExpiredTimer) {
+      console.log("TimerManager: Cannot start countdown while processing expired timer");
+      return false;
+    }
+
     if (
       this.timeChangeIP &&
       this.isPopupControlling &&
@@ -544,6 +595,8 @@ class TimerManager {
       this.totalTimeChangeIp
     );
 
+    console.log(`TimerManager: Starting countdown with ${this.totalTimeChangeIp} seconds`);
+
     // Start countdown
     this.timeChangeIP = setInterval(async () => {
       const element = document.getElementById(
@@ -564,7 +617,9 @@ class TimerManager {
       if (this.totalTimeChangeIp < 0) {
         this.clearTimeChangeCountdown();
         this.showChangingIPStatus();
-        // FIXED: Only trigger actual IP change when timer hits 0
+        
+        // CRITICAL FIX: Only trigger actual IP change when timer hits 0
+        console.log("TimerManager: Timer expired, triggering IP change...");
         await this.handleTimerExpiredWithActualChange();
         return;
       }
@@ -585,7 +640,12 @@ class TimerManager {
     return true;
   }
 
+  // ENHANCED: Better timer initialization
   async initializeTimer() {
+    if (this.isInitialized) {
+      return false;
+    }
+
     const isAutoChangeIP = StorageManager.get(
       POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
     );
@@ -605,17 +665,21 @@ class TimerManager {
     this.isInitializing = true;
 
     try {
+      console.log("TimerManager: Initializing timer, syncing with background...");
       const syncResult = await this.syncWithBackground();
 
       if (syncResult.status === "success" && syncResult.remainingTime > 0) {
-        // FIXED: Actually start the countdown timer display with remaining time
-        this.startTimeChangeCountdownWithTime(syncResult.remainingTime);
+        console.log(`TimerManager: Synced with background, starting countdown: ${syncResult.remainingTime}s`);
+        this.startTimeChangeCountdownWithTime(syncResult.remainingTime + 1);
+        this.isInitialized = true;
         return true;
       } else if (syncResult.status === "changing") {
+        console.log("TimerManager: Background is changing IP, showing processing status");
         this.showChangingIPStatus();
         this.isInitialized = true;
         return true;
       } else if (syncResult.status === "inactive") {
+        console.log("TimerManager: Background timer inactive, using default time");
         const defaultTime = StorageManager.get(
           POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
         );
@@ -623,10 +687,16 @@ class TimerManager {
         if (defaultTime) {
           const time = parseInt(defaultTime);
           this.startTimeChangeCountdownWithTime(time);
+          this.isInitialized = true;
           return true;
         }
       }
 
+      console.log("TimerManager: Could not initialize timer");
+      this.isInitialized = true;
+      return false;
+    } catch (error) {
+      console.error("TimerManager: Error during timer initialization:", error);
       this.isInitialized = true;
       return false;
     } finally {
@@ -634,44 +704,52 @@ class TimerManager {
     }
   }
 
-  // Start regular sync checks
+  // ENHANCED: Better sync check to prevent conflicts
   startSyncCheck() {
     this.stopSyncCheck();
 
     this.syncCheckInterval = setInterval(async () => {
-      if (!this.isPopupControlling) return;
+      if (!this.isPopupControlling || this.isProcessingExpiredTimer) return;
 
       try {
-        const response = await browserAPI.runtime.sendMessage({
-          greeting: "getBackgroundTimerStatus",
-          data: {},
-        });
+        const response = await Promise.race([
+          browserAPI.runtime.sendMessage({
+            greeting: "getBackgroundTimerStatus",
+            data: {},
+          }),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error("Sync check timeout")), 1000)
+          )
+        ]);
 
         if (response && response.isActive) {
+          // CRITICAL FIX: If background is changing IP, don't sync countdown
+          if (response.isChangingIP || response.isProtected) {
+            console.log("TimerManager: Background is changing IP, pausing sync check");
+            return;
+          }
+
           const now = Date.now();
-          const timeSinceLastUpdate = Math.floor(
-            (now - response.lastUpdateTime) / 1000
-          );
-          const realRemainingTime = Math.max(
-            0,
-            response.remainingTime - timeSinceLastUpdate
-          );
+          const timeSinceLastUpdate = Math.floor((now - response.lastUpdateTime) / 1000);
+          const realRemainingTime = Math.max(0, response.remainingTime - timeSinceLastUpdate);
 
           const timeDiff = Math.abs(this.totalTimeChangeIp - realRemainingTime);
 
-          if (timeDiff > 5) {
+          // CRITICAL FIX: Only sync if difference is significant and not near expiry
+          if (timeDiff > 5 && this.totalTimeChangeIp > 10) {
+            console.log(`TimerManager: Syncing timer: ${this.totalTimeChangeIp}s -> ${realRemainingTime}s`);
             this.totalTimeChangeIp = realRemainingTime;
 
-            const element = document.getElementById(
-              POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
-            );
+            const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP);
             if (element) {
               element.value = `${realRemainingTime}`;
             }
           }
         }
-      } catch (error) {}
-    }, 500);
+      } catch (error) {
+        // Ignore sync errors
+      }
+    }, 2000); // Reduce frequency to prevent conflicts
   }
 
   stopSyncCheck() {
@@ -701,19 +779,67 @@ class TimerManager {
     }
   }
 
-  // FIXED: New method that actually triggers IP change when timer expires
+  // CRITICAL FIX: Enhanced timer expiry handling with background sync
   async handleTimerExpiredWithActualChange() {
+    // CRITICAL FIX: Prevent double processing
+    if (this.isProcessingExpiredTimer) {
+      console.log("TimerManager: Already processing expired timer, skipping");
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastExpiredProcessTime < 5000) { // 5 second debounce
+      console.log("TimerManager: Timer expired too recently, skipping");
+      return;
+    }
+
+    this.isProcessingExpiredTimer = true;
+    this.lastExpiredProcessTime = now;
+
     try {
+      // CRITICAL FIX: Check if background is already handling auto change
+      console.log("TimerManager: Checking background status before processing expired timer...");
+      
+      const backgroundStatus = await Promise.race([
+        MessageHandler.sendToBackground("getBackgroundTimerStatus"),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Background status timeout")), 2000)
+        )
+      ]);
+
+      if (backgroundStatus) {
+        if (backgroundStatus.isChangingIP || backgroundStatus.isProtected) {
+          console.log("TimerManager: Background is already changing IP, skipping popup trigger");
+          // Wait for background to complete
+          await this.waitForBackgroundCompletion();
+          return;
+        }
+
+        if (backgroundStatus.isActive && backgroundStatus.remainingTime > 0) {
+          console.log("TimerManager: Background timer is still active, syncing instead of triggering");
+          this.startTimeChangeCountdownWithTime(backgroundStatus.remainingTime);
+          return;
+        }
+      }
+
+      // CRITICAL FIX: Only proceed if background is not handling auto change
+      console.log("TimerManager: Background is not handling auto change, proceeding with popup trigger");
+
       // Get current settings for the IP change
       const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
-      const proxyType =
-        StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_TYPE) || "ipv4";
-      const location = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
-      )?.value;
+      const proxyType = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_TYPE) || "ipv4";
+      const location = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT)?.value;
 
       if (!apiKey) {
-        console.error("Popup: No API key available for auto IP change");
+        console.error("TimerManager: No API key available for auto IP change");
+        await this.resetToDefaultTime();
+        return;
+      }
+
+      // CRITICAL FIX: Check proxy connection state
+      const proxyConnected = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      if (proxyConnected !== "true") {
+        console.log("TimerManager: Proxy not connected, skipping auto change");
         await this.resetToDefaultTime();
         return;
       }
@@ -722,26 +848,68 @@ class TimerManager {
       const config = {
         apiKey: apiKey,
         isAutoChangeIP: true,
-        timeAutoChangeIP:
-          StorageManager.get(
-            POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-          ) || "60",
+        timeAutoChangeIP: StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT) || "60",
         proxyType: proxyType,
+        triggeredBy: "popup_timer_expired",
+        timestamp: Date.now()
       };
 
       if (location) {
         config.location = location;
       }
 
-      // Trigger auto change IP in background
+      console.log("TimerManager: Triggering auto change IP from popup...");
+      
       await MessageHandler.sendToBackground(
         POPUP_CONFIG.BACKGROUND_MESSAGES.AUTO_CHANGE_IP,
         config
       );
+
+      console.log("TimerManager: Auto change IP triggered, waiting for background response...");
+
     } catch (error) {
-      console.error("Popup: Error during timer expired IP change:", error);
+      console.error("TimerManager: Error during timer expired IP change:", error);
       await this.resetToDefaultTime();
+    } finally {
+      // CRITICAL FIX: Always clear processing flag
+      this.isProcessingExpiredTimer = false;
     }
+  }
+
+  // NEW: Wait for background to complete auto change
+  async waitForBackgroundCompletion() {
+    console.log("TimerManager: Waiting for background to complete auto change...");
+    
+    let attempts = 0;
+    const maxAttempts = 30;
+
+    while (attempts < maxAttempts) {
+      try {
+        await this.sleep(1000);
+        attempts++;
+
+        const status = await MessageHandler.sendToBackground("getBackgroundTimerStatus");
+        
+        if (!status || (!status.isChangingIP && !status.isProtected)) {
+          console.log("TimerManager: Background completed auto change");
+          
+          if (status && status.isActive && status.remainingTime > 0) {
+            this.startTimeChangeCountdownWithTime(status.remainingTime);
+          } else {
+            await this.resetToDefaultTime();
+          }
+          return;
+        }
+
+        console.log(`TimerManager: Background still processing (attempt ${attempts}/${maxAttempts})`);
+      } catch (error) {
+        console.error("TimerManager: Error waiting for background:", error);
+        break;
+      }
+    }
+
+    console.warn("TimerManager: Timeout waiting for background, resetting to default time");
+    await this.resetToDefaultTime();
   }
 
   // MODIFIED: Original method for waiting and recovery, now without triggering IP change
@@ -787,6 +955,7 @@ class TimerManager {
     }
   }
 
+  // ENHANCED: Better cleanup
   clearTimeChangeCountdown() {
     if (this.timeChangeIP) {
       clearInterval(this.timeChangeIP);
@@ -795,13 +964,16 @@ class TimerManager {
 
     this.stopSyncCheck();
     this.markPopupInactive();
+    
+    // CRITICAL FIX: Clear processing flag
+    this.isProcessingExpiredTimer = false;
   }
 
   clearAll() {
     this.clearCountDown();
     this.clearTimeChangeCountdown();
     this.stopSyncCheck();
-    this.clearNextTimeChangeState(); // ENHANCED: Use the enhanced method
+    this.clearNextTimeChangeState();
     this.countDowntime = 0;
     this.totalTimeChangeIp = 0;
     this.autoChangeInterval = 0;
@@ -843,6 +1015,7 @@ class TimerManager {
     this.lastUpdateTime = 0;
     this.lastNotificationTime = 0;
     this.isInitialized = false;
+    this.isProcessingExpiredTimer = false;
 
     this.markPopupInactive();
   }
@@ -873,6 +1046,7 @@ class TimerManager {
     } catch (error) {}
   }
 
+  // ENHANCED: Better reset method
   async resetToDefaultTime() {
     const defaultTime = StorageManager.get(
       POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
@@ -884,9 +1058,13 @@ class TimerManager {
     if (JSON.parse(isAutoChangeIP) && defaultTime) {
       const resetTime = parseInt(defaultTime);
 
+      console.log(`TimerManager: Resetting to default time: ${resetTime}s`);
       this.clearTimeChangeCountdown();
+      
+      // Small delay to ensure cleanup is complete
+      await this.sleep(200);
+      
       this.startTimeChangeCountdownWithTime(resetTime);
-
       return true;
     }
 
@@ -984,7 +1162,6 @@ class TimerManager {
     }
 
     // Start countdown with remaining time
-
     this.startCountDown(timerData.remainingSeconds);
     return true;
   }
@@ -993,16 +1170,6 @@ class TimerManager {
     if (this.nextTimeChange) {
       clearInterval(this.nextTimeChange);
       this.nextTimeChange = null;
-    }
-  }
-
-  clearNextTimeChangeOnly() {
-    this.clearCountDown();
-    this.countDowntime = 0;
-    StorageManager.clearNextChangeTimer();
-    const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME);
-    if (element) {
-      element.innerText = "0 s";
     }
   }
 
@@ -1027,10 +1194,13 @@ class LocationManager {
     );
 
     if (proxyConnected === "true") {
+      console.log("LocationManager: 🔍 Loading proxy info from cache...");
       const cachedProxyInfo = StorageManager.getCachedProxyInfo();
 
       if (cachedProxyInfo) {
+        // Check for expiration
         if (cachedProxyInfo.expired) {
+          console.log("LocationManager: ❌ Cached proxy info is expired");
           const statusElement = document.getElementById(
             POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
           );
@@ -1041,14 +1211,22 @@ class LocationManager {
             );
             statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
           }
-
-          // FIXED: Không tự động disconnect, chỉ hiển thị lỗi
           return;
         }
 
+        console.log("LocationManager: ✅ Displaying cached proxy info:", {
+          ip: cachedProxyInfo.public_ipv4,
+          location: cachedProxyInfo.location,
+          hasNextChangeIP: !!(
+            cachedProxyInfo.nextChangeIP && cachedProxyInfo.nextChangeIP > 0
+          ),
+        });
+
+        // Display proxy info from cache
         UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
         ProxyManager.updateProxyUIStatus();
 
+        // Set location dropdown
         if (cachedProxyInfo.location) {
           const locationSelect = document.getElementById(
             POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
@@ -1058,23 +1236,24 @@ class LocationManager {
           }
         }
 
-        // FIXED: Restore nextChangeIP from background storage
+        // Restore nextChangeIP timer from background
         await this.restoreNextChangeIPFromBackground();
         return;
       } else {
-        // FIXED: Nếu không có cached data, hiển thị loading và KHÔNG gọi API
+        console.log(
+          "LocationManager: ⚠️ No cached proxy info found, showing loading..."
+        );
         UIManager.showLoadingProxyInfo();
 
-        // FIXED: Thử restore nextChangeIP từ background trước
+        // Try to restore timer from background
         const restored = await this.restoreNextChangeIPFromBackground();
 
         if (!restored) {
-          // Nếu không restore được, hiển thị connected nhưng chưa có info
           const statusElement = document.getElementById(
             POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
           );
           if (statusElement) {
-            statusElement.innerText = "• Đã kết nối (chưa có thông tin)";
+            statusElement.innerText = "• Đã kết nối (đang tải thông tin)";
             statusElement.classList.remove(
               POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER
             );
@@ -1084,6 +1263,7 @@ class LocationManager {
         return;
       }
     } else {
+      console.log("LocationManager: Not connected, clearing cache");
       UIManager.setNotConnectedStatus();
       StorageManager.clearCachedProxyInfo();
     }
@@ -1153,7 +1333,7 @@ class LocationManager {
       );
 
       if (status && (status.isChangingIP || status.isProtected)) {
-        // FIXED: Thử load từ cache thay vì chờ
+        // Load từ cache thay vì chờ
         const cachedProxyInfo = StorageManager.getCachedProxyInfo();
         if (cachedProxyInfo && !cachedProxyInfo.expired) {
           UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
@@ -1169,7 +1349,7 @@ class LocationManager {
         error
       );
 
-      // FIXED: Không gọi getProxyInfoIfConnected nếu có lỗi, thay vào đó dùng cache
+      // Không gọi getProxyInfoIfConnected nếu có lỗi, thay vào đó dùng cache
       const cachedProxyInfo = StorageManager.getCachedProxyInfo();
       if (cachedProxyInfo && !cachedProxyInfo.expired) {
         UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
@@ -1199,7 +1379,7 @@ class LocationManager {
             statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
           }
 
-          // FIXED: Chỉ hiển thị lỗi, không tự động disconnect
+          // Chỉ hiển thị lỗi, không tự động disconnect
           return;
         }
 
@@ -1215,7 +1395,7 @@ class LocationManager {
           }
         }
 
-        // FIXED: Restore nextChangeIP from background storage
+        // Restore nextChangeIP from background storage
         await this.restoreNextChangeIPFromBackground();
         return;
       } else {
@@ -1226,10 +1406,10 @@ class LocationManager {
         if (apiKey) {
           UIManager.showLoadingProxyInfo();
           try {
-            // FIXED: Sử dụng safe API call với timeout ngắn hơn
+            // Sử dụng safe API call với timeout ngắn hơn
             const apiResponse = await Promise.race([
               MessageHandler.sendToBackgroundSafe(
-                POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY_NO_CHANGE,
+                POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY,
                 {
                   apiKey: apiKey,
                   proxyType: proxyType,
@@ -1242,7 +1422,7 @@ class LocationManager {
               ),
             ]);
 
-            // FIXED: Nếu API call thất bại, không disconnect
+            // Nếu API call thất bại, không disconnect
             if (!apiResponse) {
               // Hiển thị trạng thái connected nhưng chưa có info
               const statusElement = document.getElementById(
@@ -1264,7 +1444,7 @@ class LocationManager {
           } catch (error) {
             console.error("Popup: API error:", error);
 
-            // FIXED: Không disconnect khi có lỗi API
+            // Không disconnect khi có lỗi API
             const statusElement = document.getElementById(
               POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
             );
@@ -1337,7 +1517,6 @@ class LocationManager {
       // Clear all local storage
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
       StorageManager.clearCachedProxyInfo();
-      // StorageManager.clearCachedLocations();
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
@@ -1507,37 +1686,11 @@ class UIManager {
     statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
     statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
 
-    // CRITICAL FIX: Enhanced timer handling logic
-
-    // First, try to restore any existing countdown timer
     const restored = timerManager.restoreCountDown();
 
     if (!restored) {
-      // No existing timer or timer was expired
-      // Check if we should start a new timer from API data
-
-      // CRITICAL FIX: Don't start timer if it was previously marked as expired
-      if (proxyInfo.nextChangeExpired) {
-        document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
-          "0 s";
-      } else if (proxyInfo.nextChangeIP && proxyInfo.nextChangeIP > 0) {
-        // Only start new timer if we don't have expired timer state
-        const wasExpired = StorageManager.wasNextChangeTimerExpired();
-
-        if (wasExpired) {
-          document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
-          ).innerText = "0 s";
-        } else {
-          timerManager.setCountDowntime(proxyInfo.nextChangeIP + 1);
-          timerManager.startCountDown();
-        }
-      } else {
-        // No timer data at all, show 0
-        document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
-          "0 s";
-      }
-    } else {
+      document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
+        "0 s";
     }
   }
 
@@ -1825,7 +1978,7 @@ class ChangeIPManager {
           timeChangeInput.value = savedTime;
         } else {
           // Set default time if no saved value
-          timeChangeInput.value = "60"; // Default 5 minutes
+          timeChangeInput.value = "60"; // Default 60 seconds
         }
       }
 
@@ -1902,43 +2055,33 @@ class ProxyManager {
     }
   }
 
-  // MODIFIED: Enhanced to cache proxy info and handle all success cases
   static async handleSuccessfulConnection(proxyData, preserveTimer = false) {
-    // FIXED: Smart timer handling based on context
     if (!preserveTimer) {
       timerManager.forceStopAll();
     } else {
-      // When preserveTimer is true, only clear nextChangeIP timer, keep auto change timer
       timerManager.clearNextTimeChangeOnly();
     }
 
-    // Check expiration before caching and showing
     const currentTime = Math.floor(Date.now() / 1000);
 
-    // Check key expiration first
     if (proxyData.expired && currentTime >= proxyData.expired) {
       UIManager.showError({
         data: {
           error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED.replace("• ", ""),
         },
       });
-
-      // Auto-disconnect due to key expiration
       setTimeout(async () => {
         await LocationManager.forceDisconnectProxy("Key expired");
       }, 1000);
       return;
     }
 
-    // Check proxy timeout
     if (proxyData.proxyTimeout && currentTime >= proxyData.proxyTimeout) {
       UIManager.showError({
         data: {
           error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED.replace("• ", ""),
         },
       });
-
-      // Auto-disconnect due to proxy timeout
       setTimeout(async () => {
         await LocationManager.forceDisconnectProxy("Proxy timeout");
       }, 1000);
@@ -1946,11 +2089,9 @@ class ProxyManager {
     }
 
     setTimeout(async () => {
-      // Make this async
-      // ENHANCED: Update proxy cache with latest API data
       const cacheUpdateSuccess = this.updateProxyCache(
         proxyData,
-        "ChangeIP/Connect API"
+        proxyData.cacheSource || "ChangeIP/Connect API"
       );
 
       if (!cacheUpdateSuccess) {
@@ -1959,13 +2100,25 @@ class ProxyManager {
         );
       }
 
-      // Update UI with latest proxy info (preserveTimer is passed to showProxyInfo)
       UIManager.showProxyInfo(proxyData, false, preserveTimer);
-
-      // CRITICAL FIX: Update both storage types
       await this.updateProxyUIStatus();
 
-      // FIXED: Only start auto change timer if not preserving timers and auto change is enabled
+      // ENHANCED: Check if this is from a cache update flag
+      if (proxyData.updateCache || proxyData.cacheSource) {
+        console.log(
+          `Popup: Cache updated from ${
+            proxyData.cacheSource || "unknown source"
+          }`
+        );
+        StorageManager.setCachedProxyInfo(proxyData);
+
+        try {
+          await browserAPI.storage.sync.set({ tx_proxy: proxyData });
+        } catch (error) {
+          console.error("Popup: Error updating chrome storage sync:", error);
+        }
+      }
+
       if (!preserveTimer) {
         const isAutoChangeIP = StorageManager.get(
           POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
@@ -1984,12 +2137,55 @@ class ProxyManager {
             POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
             defaultTime
           );
-
           timerManager.startTimeChangeCountdownWithTime(defaultTime);
+
+          setTimeout(async () => {
+            await this.syncNextChangeIPWithBackground();
+          }, 1000);
+        } else {
+          if (proxyData.nextChangeIP && proxyData.nextChangeIP > 0) {
+            timerManager.setCountDowntime(proxyData.nextChangeIP);
+            timerManager.startCountDown();
+          }
         }
-      } else {
       }
     }, 100);
+  }
+
+  static async syncNextChangeIPWithBackground() {
+    try {
+      // Kiểm tra xem background có đang chạy auto change không
+      const backgroundStatus = await MessageHandler.sendToBackground(
+        "getBackgroundTimerStatus"
+      );
+
+      if (backgroundStatus && backgroundStatus.isActive) {
+        // Background đang chạy auto change
+
+        // Lấy nextChangeIP từ background storage hoặc API response
+        const result = await browserAPI.storage.local.get([
+          "nextChangeTarget",
+          "nextChangeDuration",
+          "nextChangeExpired",
+        ]);
+
+        if (result.nextChangeTarget && !result.nextChangeExpired) {
+          const now = Date.now();
+          const remainingMs = result.nextChangeTarget - now;
+          const remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
+
+          if (remainingSeconds > 0) {
+            timerManager.setCountDowntime(remainingSeconds + 2);
+            timerManager.startCountDown();
+          }
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Popup: Error syncing nextChangeIP with background:",
+        error
+      );
+    }
   }
 
   static handleInfoKeySuccess(data) {
@@ -2016,33 +2212,30 @@ class ProxyManager {
 
   static async updateProxyCache(proxyData, source = "API") {
     try {
-      // CRITICAL FIX: When updating from fresh API call, clear any expired timer state
-      if (source.includes("API") || source.includes("ChangeIP")) {
-        // This is fresh data from API, so clear any previous timer expiry state
+      if (
+        source.includes("API") ||
+        source.includes("ChangeIP") ||
+        source.includes("changeIP")
+      ) {
         const wasExpired = StorageManager.wasNextChangeTimerExpired();
         if (wasExpired) {
           StorageManager.clearNextChangeTimer();
         }
       }
 
-      // Always update cache with latest data
       StorageManager.setCachedProxyInfo(proxyData);
-
-      // Also update Chrome storage for background sync
       await ChromeStorageManager.set(
         POPUP_CONFIG.STORAGE_KEYS.TX_PROXY,
         proxyData
       );
-
-      // Update local proxy info storage
       StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO, proxyData);
 
-      // CRITICAL FIX: Update chrome storage local for background sync
       await browserAPI.storage.local.set({
         proxyInfo: proxyData,
         lastProxyUpdate: Date.now(),
       });
 
+      console.log(`Popup: Successfully updated proxy cache from ${source}`);
       return true;
     } catch (error) {
       console.error(`Popup: Error updating proxy cache from ${source}:`, error);
@@ -2064,7 +2257,6 @@ class ProxyManager {
 
     // ENHANCED: Clear cached proxy info and locations
     StorageManager.clearCachedProxyInfo();
-    // StorageManager.clearCachedLocations();
 
     // ENHANCED: Clear nextTimeChange state
     timerManager.clearNextTimeChangeState();
@@ -2153,6 +2345,35 @@ class ProxyManager {
       await this.directProxy();
     }
   }
+
+  static async forceCacheRefresh() {
+    try {
+      const result = await browserAPI.storage.sync.get([
+        "tx_proxy",
+        "cacheUpdateFlag",
+      ]);
+
+      if (result.tx_proxy) {
+        StorageManager.setCachedProxyInfo(result.tx_proxy);
+
+        const proxyConnected = StorageManager.get(
+          POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
+        );
+
+        if (proxyConnected === "true") {
+          UIManager.showProxyInfo(result.tx_proxy, false, true);
+          await ProxyManager.updateProxyUIStatus();
+        }
+
+        console.log("Popup: Successfully refreshed cache from chrome storage");
+        return true;
+      }
+    } catch (error) {
+      console.error("Popup: Error forcing cache refresh:", error);
+    }
+
+    return false;
+  }
 }
 
 class EventManager {
@@ -2189,116 +2410,349 @@ class AppInitializer {
   static async initialize() {
     try {
       if (this.isInitializing) {
+        console.log("AppInitializer: Already initializing, skipping duplicate call");
         return;
       }
 
       this.isInitializing = true;
+      
+      // CRITICAL FIX: Stop all timers and clear states first
       timerManager.forceStopAll();
-
       UIManager.setNotConnectedStatus();
 
-      // FIXED: Đơn giản hóa background connection check
-      let isBackgroundConnected = false;
-      try {
-        const response = await MessageHandler.sendToBackground("ping");
-        isBackgroundConnected = response && response.pong;
-      } catch (error) {
-        console.error("Popup: Background connection failed:", error);
+      console.log("AppInitializer: 🚀 Starting popup initialization...");
+
+      // CRITICAL: Check and apply cache updates FIRST
+      const cacheUpdated = await this.checkAndApplyPendingCacheUpdates();
+      if (cacheUpdated) {
+        console.log("AppInitializer: ✅ Cache was updated from background");
       }
 
-      if (!isBackgroundConnected) {
-        const statusElement = document.getElementById(
-          POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-        );
-        if (statusElement) {
-          statusElement.innerText = "• Extension lỗi kết nối, vui lòng thử lại";
-          statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-        }
+      // CRITICAL FIX: Check background status and handle accordingly
+      const backgroundStatus = await this.checkBackgroundStatus();
+      
+      if (backgroundStatus.status === "error") {
+        console.error("AppInitializer: Background connection failed");
+        this.showBackgroundError();
         return;
       }
 
-      // FIXED: Check protection status trước khi làm gì khác
-      let backgroundStatus = null;
-      try {
-        backgroundStatus = await MessageHandler.sendToBackground(
-          "getBackgroundTimerStatus"
-        );
-      } catch (error) {
-        console.error("Popup: Failed to get background status:", error);
-      }
-
-      if (
-        backgroundStatus &&
-        (backgroundStatus.isChangingIP || backgroundStatus.isProtected)
-      ) {
-        UIManager.showProcessingNewIpConnectProtected();
-
-        // Wait for protection to clear, then continue initialization
-        setTimeout(async () => {
-          await this.continueInitialization();
-        }, 1000);
+      if (backgroundStatus.status === "protected") {
+        console.log("AppInitializer: Background is in protected state");
+        await this.handleProtectedState(backgroundStatus.data);
         return;
       }
 
-      await this.continueInitialization();
+      if (backgroundStatus.status === "changing") {
+        console.log("AppInitializer: Background is changing IP");
+        await this.handleChangingState(backgroundStatus.data);
+        return;
+      }
+
+      // CRITICAL FIX: Continue with normal initialization
+      await this.continueInitialization(backgroundStatus.data);
+
     } catch (error) {
       console.error("AppInitializer: Initialization error:", error);
-      const statusElement = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-      );
-      if (statusElement) {
-        statusElement.innerText = "• Initialization Error";
-        statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-      }
+      this.showInitializationError();
     } finally {
       this.isInitializing = false;
     }
   }
 
-  // FIXED: Cải thiện continueInitialization
-  static async continueInitialization() {
+  // NEW: Enhanced background status checking
+  static async checkBackgroundStatus() {
     try {
+      console.log("AppInitializer: Checking background connection...");
+      
+      // First, check if background is responding
+      const pingResponse = await Promise.race([
+        MessageHandler.sendToBackground("ping"),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Ping timeout")), 3000)
+        )
+      ]);
+
+      if (!pingResponse || !pingResponse.pong) {
+        return { status: "error", reason: "No ping response" };
+      }
+
+      // Then check background timer status
+      const statusResponse = await Promise.race([
+        MessageHandler.sendToBackground("getBackgroundTimerStatus"),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Status timeout")), 3000)
+        )
+      ]);
+
+      if (statusResponse) {
+        if (statusResponse.isChangingIP) {
+          return { status: "changing", data: statusResponse };
+        }
+        
+        if (statusResponse.isProtected) {
+          return { status: "protected", data: statusResponse };
+        }
+
+        return { status: "active", data: statusResponse };
+      }
+
+      return { status: "inactive" };
+
+    } catch (error) {
+      console.error("AppInitializer: Background status check failed:", error);
+      return { status: "error", reason: error.message };
+    }
+  }
+
+  // NEW: Handle protected state
+  static async handleProtectedState(backgroundData) {
+    console.log("AppInitializer: Handling protected state...");
+    
+    UIManager.showProcessingNewIpConnectProtected();
+    
+    // Wait for background to complete
+    let attempts = 0;
+    const maxAttempts = 30;
+
+    while (attempts < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      attempts++;
+
+      try {
+        const status = await MessageHandler.sendToBackground("getBackgroundTimerStatus");
+        
+        if (!status || (!status.isChangingIP && !status.isProtected)) {
+          console.log("AppInitializer: Background completed protected operation");
+          await this.continueInitialization(status);
+          return;
+        }
+
+        console.log(`AppInitializer: Waiting for background (${attempts}/${maxAttempts})`);
+      } catch (error) {
+        console.error("AppInitializer: Error checking background status:", error);
+        break;
+      }
+    }
+
+    console.warn("AppInitializer: Timeout waiting for background, continuing with initialization");
+    await this.continueInitialization();
+  }
+
+  // NEW: Handle changing state
+  static async handleChangingState(backgroundData) {
+    console.log("AppInitializer: Handling changing IP state...");
+    
+    UIManager.showProcessingNewIpConnect();
+    
+    // Similar to protected state but with different UI
+    let attempts = 0;
+    const maxAttempts = 60; // Longer timeout for IP changes
+
+    while (attempts < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      attempts++;
+
+      try {
+        const status = await MessageHandler.sendToBackground("getBackgroundTimerStatus");
+        
+        if (!status || !status.isChangingIP) {
+          console.log("AppInitializer: Background completed IP change");
+          await this.continueInitialization(status);
+          return;
+        }
+
+        console.log(`AppInitializer: Waiting for IP change (${attempts}/${maxAttempts})`);
+      } catch (error) {
+        console.error("AppInitializer: Error checking IP change status:", error);
+        break;
+      }
+    }
+
+    console.warn("AppInitializer: Timeout waiting for IP change, continuing with initialization");
+    await this.continueInitialization();
+  }
+
+  // ENHANCED: Better initialization continuation
+  static async continueInitialization(backgroundData = null) {
+    try {
+      console.log("AppInitializer: Continuing with normal initialization...");
+
       // Load locations from cache or API
       await LocationManager.loadLocations();
 
+      // Load stored settings
       const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
       if (apiKey) {
         FormManager.loadStoredSettings();
       }
 
+      // Initialize change IP manager
       ChangeIPManager.init();
 
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Small delay to ensure UI is ready
+      await new Promise(resolve => setTimeout(resolve, 500));
 
-      const proxyConnected = StorageManager.get(
-        POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
-      );
-      const isAutoChangeIP = StorageManager.get(
-        POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-      );
+      // Check connection state and handle accordingly
+      const proxyConnected = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
 
       let timerInitialized = false;
 
-      // FIXED: Khởi tạo timer trước
-      if (
-        proxyConnected === "true" &&
-        JSON.parse(isAutoChangeIP) &&
-        ChangeIPManager.isChangeIPAllowed()
-      ) {
-        timerInitialized = await timerManager.initializeTimer();
+      // CRITICAL FIX: Only initialize timer if conditions are right
+      if (proxyConnected === "true" && 
+          JSON.parse(isAutoChangeIP) && 
+          ChangeIPManager.isChangeIPAllowed()) {
+        
+        // CRITICAL FIX: Check if background timer is active first
+        if (backgroundData && backgroundData.isActive) {
+          console.log("AppInitializer: Background timer is active, syncing...");
+          
+          const now = Date.now();
+          const timeSinceLastUpdate = Math.floor((now - backgroundData.lastUpdateTime) / 1000);
+          const realRemainingTime = Math.max(0, backgroundData.remainingTime - timeSinceLastUpdate);
+
+          if (realRemainingTime > 0) {
+            timerInitialized = timerManager.startTimeChangeCountdownWithTime(realRemainingTime);
+          } else {
+            timerInitialized = await timerManager.initializeTimer();
+          }
+        } else {
+          timerInitialized = await timerManager.initializeTimer();
+        }
+
         if (timerInitialized) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          console.log("AppInitializer: Timer initialized successfully");
+          await new Promise(resolve => setTimeout(resolve, 500));
         }
       }
 
-      // FIXED: Chỉ load proxy info nếu connected, không gọi API nếu không cần thiết
+      // Load proxy info if connected
       if (proxyConnected === "true") {
-        await LocationManager.getProxyInfoIfConnectedSafeNoAPI(
-          timerInitialized
-        );
+        console.log("AppInitializer: Loading proxy information...");
+        await LocationManager.getProxyInfoIfConnectedSafeNoAPI(timerInitialized);
+      } else {
+        console.log("AppInitializer: Not connected, skipping proxy info load");
       }
+
+      console.log("AppInitializer: ✅ Initialization completed successfully");
+
     } catch (error) {
       console.error("AppInitializer: Error in continueInitialization:", error);
+      this.showInitializationError();
+    }
+  }
+
+  // ENHANCED: Better cache update checking
+  static async checkAndApplyPendingCacheUpdates() {
+    try {
+      console.log("AppInitializer: 🔍 Checking for pending cache updates...");
+
+      // Check chrome.storage.sync for pending updates
+      const result = await browserAPI.storage.sync.get([
+        "cacheUpdateFlag",
+        "tx_proxy",
+      ]);
+
+      if (result.cacheUpdateFlag && result.cacheUpdateFlag.needsLocalStorageUpdate) {
+        const updateAge = Date.now() - result.cacheUpdateFlag.timestamp;
+
+        // Apply if update is recent (within 5 minutes)
+        if (updateAge < 300000) {
+          console.log(`AppInitializer: 🎯 Found pending cache update from ${result.cacheUpdateFlag.source}`);
+          console.log(
+            `AppInitializer: Update age: ${Math.round(updateAge / 1000)}s, reason: ${
+              result.cacheUpdateFlag.reason || "N/A"
+            }`
+          );
+
+          // Update localStorage cache immediately
+          StorageManager.setCachedProxyInfo(result.cacheUpdateFlag.proxyInfo);
+
+          // Clear the needsLocalStorageUpdate flag
+          await browserAPI.storage.sync.set({
+            cacheUpdateFlag: {
+              ...result.cacheUpdateFlag,
+              needsLocalStorageUpdate: false,
+              appliedAt: Date.now(),
+              appliedBy: "popup_initialization",
+            },
+          });
+
+          console.log("AppInitializer: ✅ Applied pending cache update to localStorage");
+          return true;
+        } else {
+          console.log(`AppInitializer: Cache update too old (${Math.round(updateAge / 1000)}s), skipping`);
+        }
+      }
+
+      // Fallback checks for other cache sources
+      const fallbackResult = await this.checkFallbackCacheSources(result);
+      return fallbackResult;
+
+    } catch (error) {
+      console.error("AppInitializer: ❌ Error checking pending cache updates:", error);
+      return false;
+    }
+  }
+
+  // NEW: Check fallback cache sources
+  static async checkFallbackCacheSources(syncResult) {
+    try {
+      // Check chrome.storage.local for cached info
+      const localResult = await browserAPI.storage.local.get(["cachedProxyInfo"]);
+      
+      if (localResult.cachedProxyInfo && localResult.cachedProxyInfo.proxyInfo) {
+        const localCache = StorageManager.getCachedProxyInfo();
+        const localTimestamp = localResult.cachedProxyInfo.timestamp || 0;
+        const currentTimestamp = localCache && localCache.timestamp ? localCache.timestamp : 0;
+
+        if (localTimestamp > currentTimestamp) {
+          console.log("AppInitializer: 🔄 Found newer cache in chrome.storage.local");
+          StorageManager.setCachedProxyInfo(localResult.cachedProxyInfo.proxyInfo);
+          return true;
+        }
+      }
+
+      // Last fallback: Check tx_proxy directly
+      if (syncResult.tx_proxy) {
+        const currentCache = StorageManager.getCachedProxyInfo();
+        if (!currentCache) {
+          console.log("AppInitializer: 🔄 Using tx_proxy as fallback cache");
+          StorageManager.setCachedProxyInfo(syncResult.tx_proxy);
+          return true;
+        }
+      }
+
+      console.log("AppInitializer: No pending cache updates found");
+      return false;
+    } catch (error) {
+      console.error("AppInitializer: Error checking fallback cache sources:", error);
+      return false;
+    }
+  }
+
+  // NEW: Show background error
+  static showBackgroundError() {
+    const statusElement = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS);
+    if (statusElement) {
+      statusElement.innerText = "• Extension lỗi kết nối, vui lòng thử lại";
+      statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
+      statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+    }
+    
+    // Disable buttons
+    UIManager.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
+    UIManager.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT);
+  }
+
+  // NEW: Show initialization error
+  static showInitializationError() {
+    const statusElement = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS);
+    if (statusElement) {
+      statusElement.innerText = "• Lỗi khởi tạo extension";
+      statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
+      statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
     }
   }
 }

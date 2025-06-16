@@ -23,11 +23,10 @@ const CONFIG = {
     CHECK_VERSION: "checkVersion",
     GET_INFO_KEY: "getInfoKey",
     GET_CURRENT_PROXY: "getCurrentProxy",
-    GET_CURRENT_PROXY_NO_CHANGE: "getCurrentProxyNoChange", // NEW: Non-invasive proxy info
     CANCEL_ALL: "cancelALL",
     CHANGE_IP: "changeIp",
     AUTO_CHANGE_IP: "autoChangeIp",
-    FORCE_DISCONNECT: "forceDisconnect", // New message for Firefox
+    FORCE_DISCONNECT: "forceDisconnect",
   },
   ERRORS: {
     CONNECTION_FAILED: "Kết Nối Thất Bại",
@@ -141,6 +140,7 @@ class ProxyRequestManager {
       return false;
     }
   }
+
   async forceClearFirefoxProxy() {
     if (IS_FIREFOX) {
       try {
@@ -215,17 +215,6 @@ class ProxyRequestManager {
     }
   }
 
-  async loadFirefoxProxyState() {
-    try {
-      const result = await browserAPI.storage.local.get([
-        CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE,
-      ]);
-      return result[CONFIG.STORAGE_KEYS.FIREFOX_PROXY_ACTIVE] || false;
-    } catch (error) {
-      return false;
-    }
-  }
-
   initializeListener() {
     if (this.isListenerAdded || !browserAPI.proxy?.onRequest) return;
 
@@ -285,8 +274,6 @@ class ProxyRequestManager {
     }
 
     const result = this.processProxy(this.proxy);
-    if (IS_FIREFOX && result.type !== "direct") {
-    }
     return result;
   }
 
@@ -334,10 +321,8 @@ class ProxyRequestManager {
     } catch (error) {
       console.error("ProxyRequestManager: Error clearing storage:", error);
     }
-
   }
 
-  // NEW: Force refresh Firefox proxy state
   async forceRefreshFirefoxState() {
     if (IS_FIREFOX) {
       // Reload current settings
@@ -351,19 +336,6 @@ class ProxyRequestManager {
         this.isFirefoxProxyActive = false;
         await this.saveFirefoxProxyState(false);
       }
-    }
-  }
-
-  // NEW: Force clear method for Firefox
-  async forceClearFirefoxProxy() {
-    if (IS_FIREFOX) {
-      this.isFirefoxProxyActive = false;
-      await this.saveFirefoxProxyState(false);
-
-      // Additional cleanup
-      this.mode = "";
-      this.proxy = {};
-      this.isInitialized = false;
     }
   }
 
@@ -535,8 +507,38 @@ class AutoChangeManager {
     this.changeDebounce = 3000;
     this.startTime = 0;
     this.lastUpdateTime = 0;
-    // NEW: Protection flag để tránh conflict
     this.isProtected = false;
+    this.executionMutex = false;
+    this.lastConfigValidation = 0;
+  }
+
+  // ENHANCED: Validate config before execution
+  validateConfig() {
+    const now = Date.now();
+    
+    // Cache validation for 1 second to prevent repeated checks
+    if (now - this.lastConfigValidation < 1000) {
+      return !!this.config;
+    }
+    
+    this.lastConfigValidation = now;
+    
+    if (!this.config) {
+      console.error("AutoChangeManager: Config is null");
+      return false;
+    }
+    
+    if (!this.config.apiKey) {
+      console.error("AutoChangeManager: API key is missing");
+      return false;
+    }
+    
+    if (!this.config.timeAutoChangeIP || this.config.timeAutoChangeIP <= 0) {
+      console.error("AutoChangeManager: Invalid timeAutoChangeIP");
+      return false;
+    }
+    
+    return true;
   }
 
   async start(config) {
@@ -564,9 +566,32 @@ class AutoChangeManager {
     this.lastUpdateTime = Date.now();
 
     await this.saveState();
+    await this.initializeNextChangeIPTimer();
     this.scheduleTimer();
-
     return true;
+  }
+
+  async initializeNextChangeIPTimer() {
+    try {
+      const result = await browserAPI.storage.sync.get(["tx_proxy"]);
+      const proxyInfo = result.tx_proxy;
+
+      if (proxyInfo && proxyInfo.nextChangeIP && proxyInfo.nextChangeIP > 0) {
+        const targetTime = Date.now() + proxyInfo.nextChangeIP * 1000;
+
+        await browserAPI.storage.local.set({
+          nextChangeTarget: targetTime,
+          nextChangeDuration: proxyInfo.nextChangeIP,
+          nextChangeStartTime: Date.now(),
+          nextChangeExpired: false,
+        });
+      }
+    } catch (error) {
+      console.error(
+        "AutoChangeManager: Error initializing nextChangeIP timer:",
+        error
+      );
+    }
   }
 
   scheduleTimer() {
@@ -584,10 +609,6 @@ class AutoChangeManager {
       this.lastUpdateTime = Date.now();
       await this.saveState();
 
-      // Log every 10 seconds or when less than 10 seconds remain
-      if (this.remainingTime % 10 === 0 || this.remainingTime <= 10) {
-      }
-
       if (this.remainingTime <= 0) {
         await this.executeAutoChange();
       } else {
@@ -597,161 +618,250 @@ class AutoChangeManager {
   }
 
   async executeAutoChange() {
-    // Validate config exists
-    if (!this.config || !this.config.apiKey) {
-      console.error("AutoChangeManager: No valid config for auto change");
-      this.stop();
+    // CRITICAL FIX: Add mutex protection to prevent double execution
+    if (this.executionMutex) {
+      console.log("AutoChangeManager: Already executing, skipping duplicate call");
       return;
     }
 
-    if (this.isChangingIP) return;
+    // CRITICAL FIX: Validate config before proceeding
+    if (!this.validateConfig()) {
+      console.error("AutoChangeManager: Invalid config, stopping auto change");
+      await this.stop();
+      return;
+    }
+
+    // CRITICAL FIX: Check if already changing IP
+    if (this.isChangingIP) {
+      console.log("AutoChangeManager: Already changing IP, skipping");
+      return;
+    }
 
     const now = Date.now();
-    if (now - this.lastChangeTime < this.changeDebounce) return;
+    if (now - this.lastChangeTime < this.changeDebounce) {
+      console.log("AutoChangeManager: Still in debounce period, skipping");
+      return;
+    }
 
-    // FIXED: Set protection flags
+    // Set mutex to prevent double execution
+    this.executionMutex = true;
     this.isChangingIP = true;
     this.isProtected = true;
     this.lastChangeTime = now;
 
     try {
-      
-      // FIXED: Thông báo cho popup về trạng thái protected
-      this.sendToPopup("showProcessingNewIpConnect", {
-        isAutoChanging: true,
-        isProtected: true
-      });
-
-      // Step 1: Disconnect proxy with verification
-      const disconnectSuccess = await proxyManager.disconnectProxyOnly();
-
-      if (!disconnectSuccess) {
-        console.warn(
-          "AutoChangeManager: disconnectProxyOnly returned false, but continuing"
-        );
-      }
-
-      // Step 2: Verify proxy is truly disconnected with retries
-      const verifySuccess = await this.verifyProxyDisconnected();
-
-      if (!verifySuccess) {
-        console.warn(
-          "AutoChangeManager: Proxy verification failed, but continuing with IP change"
-        );
-      }
-
-      // Step 3: Wait for proxy state to settle
-      const waitTime = IS_FIREFOX ? 2000 : 1000;
-    
-      await this.sleep(waitTime);
-
-      // Step 4: Double check config still exists after wait
-      if (!this.config || !this.config.apiKey) {
-        console.error("AutoChangeManager: Config lost during execution");
-        this.stop();
+      // ENHANCED: Validate config again after setting mutex
+      if (!this.validateConfig()) {
+        console.error("AutoChangeManager: Config became invalid during execution");
         return;
       }
 
-      // Step 5: Call API to change IP
+      console.log("AutoChangeManager: Starting IP change process...");
+      
+      // Notify popup if it's open
+      this.sendToPopup("showProcessingNewIpConnect", {
+        isAutoChanging: true,
+        isProtected: true,
+      });
+
+      // Disconnect current proxy
+      const disconnectSuccess = await proxyManager.disconnectProxyOnly();
+      if (!disconnectSuccess) {
+        console.warn("AutoChangeManager: Proxy disconnect may have failed, continuing...");
+      }
+
+      // Verify disconnection
+      const verifySuccess = await this.verifyProxyDisconnected();
+      if (!verifySuccess) {
+        console.warn("AutoChangeManager: Could not verify proxy disconnection, continuing...");
+      }
+
+      // Wait before API call
+      await this.sleep(1000);
+
+      // CRITICAL FIX: Validate config one more time before API call
+      if (!this.validateConfig()) {
+        console.error("AutoChangeManager: Config lost during process, aborting");
+        return;
+      }
+
+      console.log("AutoChangeManager: Calling changeIP API...");
       const result = await APIService.changeIP(
         this.config.apiKey,
         this.config.location
       );
 
       if (result && result.code === 200) {
-        await proxyManager.handleProxyResponse(
-          result.data,
-          this.config.apiKey,
-          this.config.proxyType
-        );
-
-        // FIXED: Lưu nextChangeIP vào storage ngay khi change IP thành công
-        if (result.data.nextChangeIP && result.data.nextChangeIP > 0) {
-          try {
-            const targetTime = Date.now() + result.data.nextChangeIP * 1000;
-            await browserAPI.storage.local.set({
-              nextChangeTarget: targetTime,
-              nextChangeDuration: result.data.nextChangeIP,
-              nextChangeStartTime: Date.now(),
-              nextChangeExpired: false,
-            });
-        
-          } catch (error) {
-            console.error(
-              "AutoChangeManager: Error saving nextChangeIP timer:",
-              error
-            );
-          }
-        }
-
-        // Reset auto change timer
-        this.remainingTime = this.originalDuration;
-        this.startTime = Date.now();
-        this.lastUpdateTime = Date.now();
-        await this.saveState();
-
-        // FIXED: Send success with protection info
-        this.sendToPopup("successGetProxyInfo", {
-          ...result.data,
-          isAutoChanging: false,
-          isProtected: false
-        });
-
-        if (this.isRunning) {
-          this.scheduleTimer();
-        }
+        console.log("AutoChangeManager: ✅ API changeIP successful, updating cache...");
+        await this.handleSuccessfulIPChange(result);
       } else {
-        console.error("AutoChangeManager: API call failed:", result);
-        const error =
-          result?.code === 500
-            ? "Kết Nối Thất Bại"
-            : result?.message || "Lỗi không xác định";
-
-        this.sendToPopup("failureGetProxyInfo", { error });
-
-        // On failure, ensure we stay in direct proxy mode
-        await proxyManager.disconnectProxyOnly();
-
-        if (this.isRunning) {
-          this.remainingTime = 30;
-          this.lastUpdateTime = Date.now();
-          await this.saveState();
-          this.scheduleTimer();
-        }
+        console.error("AutoChangeManager: ❌ API call failed:", result);
+        await this.handleFailedIPChange(result);
       }
+
     } catch (error) {
-      console.error(
-        "AutoChangeManager: Unexpected error during IP change:",
-        error
-      );
-
-      // On any error, ensure direct proxy
-      try {
-        await proxyManager.disconnectProxyOnly();
-      } catch (directError) {
-        console.error(
-          "AutoChangeManager: Failed to disconnect proxy after error:",
-          directError
-        );
-      }
-
-      if (this.isRunning) {
-        this.remainingTime = 30;
-        this.lastUpdateTime = Date.now();
-        await this.saveState();
-
-        this.scheduleTimer();
-      }
+      console.error("AutoChangeManager: ❌ Unexpected error during IP change:", error);
+      await this.handleIPChangeError(error);
     } finally {
-      // FIXED: Clear protection flags
+      // CRITICAL FIX: Always clean up mutex and flags
+      this.executionMutex = false;
       this.isChangingIP = false;
       this.isProtected = false;
+      console.log("AutoChangeManager: executeAutoChange completed");
+    }
+  }
+
+  // NEW: Handle successful IP change
+  async handleSuccessfulIPChange(result) {
+    try {
+      // CRITICAL: Validate config before building proxy info
+      if (!this.validateConfig()) {
+        console.error("AutoChangeManager: Config invalid during success handling");
+        return;
+      }
+
+      // Build proxy info from API response
+      const proxyInfo = await proxyManager.buildProxyInfo(
+        result.data,
+        this.config.apiKey,
+        this.config.proxyType
+      );
+
+      // Set proxy settings
+      await proxyManager.setProxySettings(proxyInfo);
+
+      // Update storage
+      await this.updateStorageWithProxyInfo(proxyInfo);
+
+      // Sync nextChangeIP timer
+      await this.syncNextChangeIPTimer(result.data);
+
+      // Reset auto change timer for next cycle
+      this.remainingTime = this.originalDuration;
+      this.startTime = Date.now();
+      this.lastUpdateTime = Date.now();
+      await this.saveState();
+
+      // Notify popup
+      this.sendToPopup("successGetProxyInfo", {
+        ...proxyInfo,
+        isAutoChanging: false,
+        isProtected: false,
+        updateCache: true,
+        cacheSource: "autoChangeIP",
+        autoChangeCompleted: true,
+      });
+
+      // Continue auto change cycle if still running
+      if (this.isRunning && this.validateConfig()) {
+        console.log(`AutoChangeManager: ✅ Scheduling next auto change in ${this.remainingTime}s`);
+        this.scheduleTimer();
+      }
+
+    } catch (error) {
+      console.error("AutoChangeManager: Error handling successful IP change:", error);
+      await this.handleIPChangeError(error);
+    }
+  }
+
+  // NEW: Handle failed IP change
+  async handleFailedIPChange(result) {
+    const error = result?.code === 500 
+      ? "Kết Nối Thất Bại" 
+      : result?.message || "Lỗi không xác định";
+
+    // Notify popup if open
+    this.sendToPopup("failureGetProxyInfo", { error });
+
+    // Try to recover proxy connection
+    await proxyManager.disconnectProxyOnly();
+
+    if (this.isRunning && this.validateConfig()) {
+      // Retry after 30 seconds on error
+      this.remainingTime = 30;
+      this.lastUpdateTime = Date.now();
+      await this.saveState();
+      console.log("AutoChangeManager: Retrying in 30 seconds after API error");
+      this.scheduleTimer();
+    }
+  }
+
+  // NEW: Handle IP change error
+  async handleIPChangeError(error) {
+    try {
+      await proxyManager.disconnectProxyOnly();
+    } catch (directError) {
+      console.error("AutoChangeManager: Failed to disconnect proxy after error:", directError);
+    }
+
+    if (this.isRunning && this.validateConfig()) {
+      this.remainingTime = 30;
+      this.lastUpdateTime = Date.now();
+      await this.saveState();
+      this.scheduleTimer();
+    }
+  }
+
+  // NEW: Update storage with proxy info
+  async updateStorageWithProxyInfo(proxyInfo) {
+    try {
+      // Update chrome.storage.sync (main bridge to popup)
+      await browserAPI.storage.sync.set({
+        [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
+        cacheUpdateFlag: {
+          timestamp: Date.now(),
+          source: "autoChangeIP",
+          proxyInfo: proxyInfo,
+          needsLocalStorageUpdate: true,
+          reason: "Auto change IP completed while popup closed",
+        },
+      });
+
+      // Update chrome.storage.local (backup + immediate access)
+      await browserAPI.storage.local.set({
+        proxyInfo: proxyInfo,
+        lastProxyUpdate: Date.now(),
+        cachedProxyInfo: {
+          proxyInfo: proxyInfo,
+          timestamp: Date.now(),
+          version: 1,
+          source: "autoChangeIP",
+        },
+      });
+
+      console.log("AutoChangeManager: ✅ Successfully updated proxy cache in all storage locations");
+    } catch (cacheError) {
+      console.error("AutoChangeManager: ❌ Error updating proxy cache:", cacheError);
+    }
+  }
+
+  // NEW: Sync nextChangeIP timer
+  async syncNextChangeIPTimer(data) {
+    if (data.nextChangeIP && data.nextChangeIP > 0) {
+      try {
+        const currentTime = Date.now();
+        const nextChangeTarget = currentTime + data.nextChangeIP * 1000;
+        await browserAPI.storage.local.set({
+          nextChangeTarget: nextChangeTarget,
+          nextChangeDuration: data.nextChangeIP,
+          nextChangeStartTime: currentTime,
+          nextChangeExpired: false,
+        });
+        console.log(`AutoChangeManager: ✅ Synced nextChangeIP timer: ${data.nextChangeIP}s`);
+      } catch (error) {
+        console.error("AutoChangeManager: Error synchronizing timers:", error);
+      }
     }
   }
 
   // NEW: Check if auto change is in protected state
   isInProtectedState() {
     return this.isChangingIP || this.isProtected;
+  }
+
+  // NEW: Check if auto change is in protected or changing state
+  isInProtectedOrChangingState() {
+    return this.isChangingIP || this.isProtected || this.executionMutex;
   }
 
   // ENHANCED: getStatus with protection info
@@ -761,7 +871,8 @@ class AutoChangeManager {
       remainingTime: this.remainingTime,
       originalDuration: this.originalDuration,
       isChangingIP: this.isChangingIP,
-      isProtected: this.isProtected, // NEW
+      isProtected: this.isProtected,
+      executionMutex: this.executionMutex,
       config: this.config
         ? {
             hasApiKey: !!this.config.apiKey,
@@ -778,7 +889,6 @@ class AutoChangeManager {
 
   async verifyProxyDisconnected() {
     try {
-   
       let attempts = 0;
       const maxAttempts = 10;
       const baseDelay = 200;
@@ -786,7 +896,6 @@ class AutoChangeManager {
       while (attempts < maxAttempts) {
         // Check internal proxy state
         const currentProxy = proxyRequestManager.getCurrentProxy();
-     
 
         // FIXED: More comprehensive proxy state checking
         const isProxyActive =
@@ -801,8 +910,6 @@ class AutoChangeManager {
 
         // If still active, try to clear again
         if (attempts < maxAttempts - 1) {
-      
-
           // Clear with increasing delay
           await proxyRequestManager.clearProxy();
 
@@ -841,13 +948,12 @@ class AutoChangeManager {
     }
   }
 
+  // ENHANCED: Better state validation
   async saveState() {
     try {
-      // Only save if we have valid config
-      if (!this.config || !this.config.apiKey) {
-        console.warn(
-          "AutoChangeManager: Cannot save state without valid config"
-        );
+      // Validate config before saving
+      if (!this.validateConfig()) {
+        console.warn("AutoChangeManager: Cannot save state without valid config");
         return;
       }
 
@@ -859,7 +965,8 @@ class AutoChangeManager {
         startTime: this.startTime,
         lastUpdateTime: this.lastUpdateTime,
         isChangingIP: this.isChangingIP,
-        isProtected: this.isProtected, // NEW
+        isProtected: this.isProtected,
+        executionMutex: this.executionMutex,
         version: Date.now(),
       };
 
@@ -869,6 +976,7 @@ class AutoChangeManager {
     }
   }
 
+  // ENHANCED: Better state loading with validation
   async loadState() {
     try {
       const result = await browserAPI.storage.local.get(["autoChangeState"]);
@@ -876,9 +984,7 @@ class AutoChangeManager {
 
       if (state && state.isRunning && state.config) {
         const now = Date.now();
-        const timeSinceLastUpdate = Math.floor(
-          (now - state.lastUpdateTime) / 1000
-        );
+        const timeSinceLastUpdate = Math.floor((now - state.lastUpdateTime) / 1000);
 
         // Only restore if not too old (less than 10 minutes)
         if (timeSinceLastUpdate < 600) {
@@ -894,12 +1000,16 @@ class AutoChangeManager {
           this.config = state.config;
           this.startTime = state.startTime;
           this.isChangingIP = state.isChangingIP || false;
-          this.isProtected = state.isProtected || false; // NEW
+          this.isProtected = state.isProtected || false;
+          this.executionMutex = state.executionMutex || false;
 
-          this.remainingTime = Math.max(
-            0,
-            state.remainingTime - timeSinceLastUpdate
-          );
+          // CRITICAL FIX: Clear mutex if it was stuck
+          if (this.executionMutex) {
+            console.warn("AutoChangeManager: Clearing stuck execution mutex");
+            this.executionMutex = false;
+          }
+
+          this.remainingTime = Math.max(0, state.remainingTime - timeSinceLastUpdate);
           this.lastUpdateTime = now;
           await this.saveState();
 
@@ -930,7 +1040,10 @@ class AutoChangeManager {
     }
   }
 
+  // ENHANCED: Better stop method
   async stop() {
+    console.log("AutoChangeManager: Stopping auto change...");
+    
     this.isRunning = false;
 
     if (this.timer) {
@@ -945,10 +1058,14 @@ class AutoChangeManager {
     this.originalDuration = 0;
     this.config = null;
     this.isChangingIP = false;
-    this.isProtected = false; // NEW
+    this.isProtected = false;
+    this.executionMutex = false;
     this.lastUpdateTime = 0;
     this.lastChangeTime = 0;
     this.startTime = 0;
+    this.lastConfigValidation = 0;
+    
+    console.log("AutoChangeManager: Auto change stopped");
   }
 
   sleep(ms) {
@@ -977,6 +1094,87 @@ class AutoChangeManager {
 }
 
 class MessageHandler {
+  constructor() {
+    // NEW: Add request tracking to prevent duplicates
+    this.activeRequests = new Map();
+    this.requestTimeout = 5000; // 5 seconds
+  }
+
+  // NEW: Generate unique request ID
+  generateRequestId(greeting, data) {
+    const key = `${greeting}_${data?.apiKey || 'no_key'}_${Date.now()}`;
+    return key;
+  }
+
+  // NEW: Check if request is duplicate
+  isDuplicateRequest(greeting, data) {
+    const baseKey = `${greeting}_${data?.apiKey || 'no_key'}`;
+    
+    // Check for active requests with same base key
+    for (const [requestId, requestData] of this.activeRequests.entries()) {
+      if (requestId.startsWith(baseKey)) {
+        const timeDiff = Date.now() - requestData.timestamp;
+        if (timeDiff < 3000) { // 3 second window
+          console.log(`MessageHandler: Duplicate request detected: ${greeting}`);
+          return true;
+        }
+      }
+    }
+    
+    return false;
+  }
+
+  // NEW: Enhanced duplicate detection for auto change IP
+  isDuplicateAutoChangeRequest(data) {
+    // Check if auto change is already running
+    if (autoChangeManager.isRunning) {
+      console.log("MessageHandler: Auto change already running");
+      return true;
+    }
+
+    // Check if auto change is in protected state
+    if (autoChangeManager.isInProtectedOrChangingState && 
+        autoChangeManager.isInProtectedOrChangingState()) {
+      console.log("MessageHandler: Auto change in protected state");
+      return true;
+    }
+
+    // Check for recent similar requests
+    const baseKey = `${CONFIG.MESSAGES.AUTO_CHANGE_IP}_${data?.apiKey || 'no_key'}`;
+    const now = Date.now();
+    
+    for (const [requestId, requestData] of this.activeRequests.entries()) {
+      if (requestId.startsWith(baseKey)) {
+        const timeDiff = now - requestData.timestamp;
+        if (timeDiff < 5000) { // 5 second window for auto change
+          console.log(`MessageHandler: Recent AUTO_CHANGE_IP request found (${timeDiff}ms ago)`);
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  // NEW: Track request
+  trackRequest(requestId, greeting, data) {
+    this.activeRequests.set(requestId, {
+      greeting,
+      data,
+      timestamp: Date.now()
+    });
+
+    // Auto cleanup after timeout
+    setTimeout(() => {
+      this.activeRequests.delete(requestId);
+    }, this.requestTimeout);
+  }
+
+  // NEW: Complete request
+  completeRequest(requestId) {
+    this.activeRequests.delete(requestId);
+  }
+
   sendToPopup(message, data = null) {
     try {
       // Check if runtime is still valid before sending
@@ -993,6 +1191,8 @@ class MessageHandler {
   }
 
   async handleMessage(request, sender, sendResponse) {
+    const requestId = this.generateRequestId(request.greeting, request.data);
+    
     try {
       switch (request.greeting) {
         case "ping":
@@ -1029,139 +1229,52 @@ class MessageHandler {
           sendResponse({ success: true });
           break;
 
-        // NEW: Handle non-invasive proxy info request
-        case CONFIG.MESSAGES.GET_CURRENT_PROXY_NO_CHANGE:
-          await this.getCurrentProxyNoChange(
-            request.data.apiKey,
-            request.data.proxyType,
-            request.data.preserveTimer
-          );
-          sendResponse({ success: true });
-          break;
-
-        // NEW: Handle force disconnect for Firefox
         case CONFIG.MESSAGES.FORCE_DISCONNECT:
-          // Send response immediately
           sendResponse({ success: true });
-
-          // Process disconnection asynchronously
-          (async () => {
-            try {
-              // Stop any running auto change
-              await autoChangeManager.stop();
-
-              // Force clear Firefox proxy state multiple times
-              if (IS_FIREFOX) {
-                for (let i = 0; i < 3; i++) {
-                  await proxyRequestManager.forceClearFirefoxProxy();
-                  await this.sleep(200);
-                }
-              }
-
-              // Clear authentication
-              authManager.clear();
-
-              // Clear browser proxy
-              await BrowserProxyManager.clearBrowserProxy();
-
-              // Clear proxy settings
-              await proxyRequestManager.clearProxy();
-
-              // Update badge
-              proxyManager.setBadgeOff();
-
-              // Clear storage
-              await browserAPI.storage.sync.set({
-                [CONFIG.STORAGE_KEYS.TX_PROXY]: null,
-              });
-            } catch (error) {
-              console.error(
-                "Background: Error during force disconnect:",
-                error
-              );
-              // Try one more time
-              try {
-                await proxyManager.setDirectProxy();
-              } catch (e) {
-                console.error(
-                  "Background: Final attempt to disconnect failed:",
-                  e
-                );
-              }
-            }
-          })();
+          this.handleForceDisconnect(request.data);
           break;
 
         case CONFIG.MESSAGES.CANCEL_ALL:
-          // Don't wait for response, process immediately
           sendResponse({ success: true });
-
-          // Process disconnect asynchronously
-          (async () => {
-            try {
-              this.deleteAlarm("flagLoop");
-              this.deleteAlarm("refreshPage");
-              await autoChangeManager.stop();
-
-              // Ensure complete disconnection
-
-              await proxyManager.setDirectProxy();
-
-              // For Firefox, extra verification
-              if (IS_FIREFOX) {
-                await this.sleep(500);
-                // Double check Firefox state
-                const state = await proxyRequestManager.loadFirefoxProxyState();
-                if (state) {
-                  await proxyRequestManager.forceClearFirefoxProxy();
-                }
-              }
-            } catch (error) {
-              console.error("Background: Error during cancel all:", error);
-              // Even on error, try to ensure proxy is disconnected
-              try {
-                await proxyManager.setDirectProxy();
-              } catch (e) {
-                console.error(
-                  "Background: Failed to set direct proxy on error:",
-                  e
-                );
-              }
-            }
-          })();
+          this.handleCancelAll(request.data);
           break;
 
         case CONFIG.MESSAGES.CHANGE_IP:
-          await autoChangeManager.stop();
+          // CRITICAL FIX: Check for duplicate requests
+          if (this.isDuplicateRequest(request.greeting, request.data)) {
+            sendResponse({ success: true, duplicate: true });
+            break;
+          }
 
-          // Ensure proxy is disconnected before changing IP
-          await proxyManager.setDirectProxy();
-          await this.sleep(IS_FIREFOX ? 2000 : 1000);
-
-          await this.changeIP(
-            request.data.apiKey,
-            request.data.location,
-            request.data.proxyType
-          );
-          sendResponse({ success: true });
+          this.trackRequest(requestId, request.greeting, request.data);
+          
+          try {
+            await autoChangeManager.stop();
+            await proxyManager.setDirectProxy();
+            await this.sleep(1000);
+            await this.changeIP(request.data.apiKey, request.data.location, request.data.proxyType);
+            sendResponse({ success: true });
+          } finally {
+            this.completeRequest(requestId);
+          }
           break;
 
         case CONFIG.MESSAGES.AUTO_CHANGE_IP:
-          await autoChangeManager.stop();
-          await this.sleep(500);
+          // CRITICAL FIX: Enhanced duplicate detection for auto change
+          if (this.isDuplicateAutoChangeRequest(request.data)) {
+            console.log("MessageHandler: Duplicate AUTO_CHANGE_IP request, ignoring");
+            sendResponse({ success: true, duplicate: true });
+            break;
+          }
 
-          // Ensure proxy is disconnected before starting auto change
-
-          await proxyManager.setDirectProxy();
-          await this.sleep(IS_FIREFOX ? 2000 : 1000);
-
-          await this.changeIP(
-            request.data.apiKey,
-            request.data.location,
-            request.data.proxyType
-          );
-          await autoChangeManager.start(request.data);
-          sendResponse({ success: true });
+          this.trackRequest(requestId, request.greeting, request.data);
+          
+          try {
+            await this.handleAutoChangeIP(request.data);
+            sendResponse({ success: true });
+          } finally {
+            this.completeRequest(requestId);
+          }
           break;
 
         default:
@@ -1170,8 +1283,137 @@ class MessageHandler {
       }
     } catch (error) {
       console.error("Background: Error handling message:", error);
+      this.completeRequest(requestId);
       sendResponse({ error: error.message });
     }
+  }
+
+  // NEW: Enhanced auto change IP handler
+  async handleAutoChangeIP(data) {
+    try {
+      console.log("MessageHandler: Processing AUTO_CHANGE_IP request...");
+      
+      // CRITICAL FIX: Ensure auto change is fully stopped first
+      await autoChangeManager.stop();
+      await this.sleep(500);
+
+      // Ensure proxy is disconnected before starting auto change
+      await proxyManager.setDirectProxy();
+      await this.sleep(1000);
+
+      // CRITICAL FIX: Validate data before proceeding
+      if (!data.apiKey) {
+        console.error("MessageHandler: No API key provided for auto change");
+        return;
+      }
+
+      console.log("MessageHandler: Starting initial IP change for auto change...");
+      
+      // First, change IP
+      await this.changeIP(data.apiKey, data.location, data.proxyType);
+
+      // CRITICAL FIX: Wait a bit before starting auto change to avoid conflicts
+      await this.sleep(2000);
+
+      // Then start auto change manager
+      console.log("MessageHandler: Starting auto change manager...");
+      const started = await autoChangeManager.start(data);
+      
+      if (!started) {
+        console.error("MessageHandler: Failed to start auto change manager");
+        this.sendToPopup("failureGetProxyInfo", { 
+          error: "Không thể khởi động tự động đổi IP" 
+        });
+      } else {
+        console.log("MessageHandler: Auto change manager started successfully");
+      }
+
+    } catch (error) {
+      console.error("MessageHandler: Error in handleAutoChangeIP:", error);
+      this.sendToPopup("failureGetProxyInfo", { 
+        error: "Lỗi khi khởi động tự động đổi IP" 
+      });
+    }
+  }
+
+  // NEW: Enhanced force disconnect handler
+  async handleForceDisconnect(data) {
+    (async () => {
+      try {
+        console.log("MessageHandler: Processing FORCE_DISCONNECT...");
+        
+        // Stop any running auto change
+        await autoChangeManager.stop();
+
+        // Force clear Firefox proxy state multiple times
+        if (IS_FIREFOX) {
+          for (let i = 0; i < 3; i++) {
+            await proxyRequestManager.forceClearFirefoxProxy();
+            await this.sleep(200);
+          }
+        }
+
+        // Clear authentication
+        authManager.clear();
+
+        // Clear browser proxy
+        await BrowserProxyManager.clearBrowserProxy();
+
+        // Clear proxy settings
+        await proxyRequestManager.clearProxy();
+
+        // Update badge
+        proxyManager.setBadgeOff();
+
+        // Clear storage
+        await browserAPI.storage.sync.set({
+          [CONFIG.STORAGE_KEYS.TX_PROXY]: null,
+        });
+
+        console.log("MessageHandler: FORCE_DISCONNECT completed");
+      } catch (error) {
+        console.error("MessageHandler: Error during force disconnect:", error);
+        try {
+          await proxyManager.setDirectProxy();
+        } catch (e) {
+          console.error("MessageHandler: Final attempt to disconnect failed:", e);
+        }
+      }
+    })();
+  }
+
+  // NEW: Enhanced cancel all handler
+  async handleCancelAll(data) {
+    (async () => {
+      try {
+        console.log("MessageHandler: Processing CANCEL_ALL...");
+        
+        this.deleteAlarm("flagLoop");
+        this.deleteAlarm("refreshPage");
+        await autoChangeManager.stop();
+
+        // Ensure complete disconnection
+        await proxyManager.setDirectProxy();
+
+        // For Firefox, extra verification
+        if (IS_FIREFOX) {
+          await this.sleep(500);
+          const state = await proxyRequestManager.loadFirefoxProxyState();
+          if (state) {
+            await proxyRequestManager.forceClearFirefoxProxy();
+          }
+        }
+
+        console.log("MessageHandler: CANCEL_ALL completed");
+      } catch (error) {
+        console.error("MessageHandler: Error during cancel all:", error);
+        try {
+          await proxyManager.setDirectProxy();
+        } catch (e) {
+          console.error("MessageHandler: Failed to set direct proxy on error:", e);
+        }
+      }
+    })();
   }
 
   sleep(ms) {
@@ -1218,57 +1460,45 @@ class MessageHandler {
     }
   }
 
-  // NEW: Non-invasive proxy info retrieval
-  async getCurrentProxyNoChange(apiKey, proxyType, preserveTimer = false) {
- 
-
-    this.sendToPopup("processingGetProxyInfo", {});
-
-    try {
-      const result = await APIService.getInfoKey(apiKey);
-      if (result?.code === 200) {
-        // CRITICAL: Use non-invasive proxy response handling
-        await proxyManager.handleProxyResponseNoChange(
-          result.data,
-          apiKey,
-          proxyType,
-          preserveTimer
-        );
-      } else {
-        const error =
-          result?.status === 500
-            ? CONFIG.ERRORS.CONNECTION_FAILED
-            : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
-        this.sendToPopup("failureGetProxyInfo", { error });
-      }
-    } catch (error) {
-      console.error("Background: Error in getCurrentProxyNoChange:", error);
-      this.sendToPopup("failureGetProxyInfo", {
-        error: CONFIG.ERRORS.UNKNOWN_ERROR,
-      });
-    }
-  }
-
+  // ENHANCED: Better change IP method with duplicate protection
   async changeIP(apiKey, location, proxyType) {
+    console.log("MessageHandler: Starting changeIP process...");
+    
     this.sendToPopup("showProcessingNewIpConnect", {});
 
     try {
-      // First, ensure proxy is completely disconnected
       await proxyManager.setDirectProxy();
-
-      // Wait for proxy to be fully disconnected
       const waitTime = IS_FIREFOX ? 2000 : 1000;
       await this.sleep(waitTime);
 
+      console.log("MessageHandler: Calling changeIP API...");
       const result = await APIService.changeIP(apiKey, location);
 
       if (result?.code === 200) {
+        console.log("MessageHandler: changeIP API successful");
         await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
+
+        // Update cached proxy info after successful change IP
+        try {
+          const proxyInfo = await proxyManager.buildProxyInfo(result.data, apiKey, proxyType);
+
+          await browserAPI.storage.sync.set({
+            [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
+            cacheUpdateFlag: {
+              timestamp: Date.now(),
+              source: "changeIP",
+              proxyInfo: proxyInfo,
+            },
+          });
+
+          console.log("MessageHandler: Successfully updated proxy cache after change IP");
+        } catch (cacheError) {
+          console.error("MessageHandler: Error updating proxy cache:", cacheError);
+        }
       } else {
-        const error =
-          result?.code === 500
-            ? CONFIG.ERRORS.CONNECTION_FAILED
-            : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
+        const error = result?.code === 500 
+          ? CONFIG.ERRORS.CONNECTION_FAILED 
+          : result?.message || CONFIG.ERRORS.UNKNOWN_ERROR;
         this.sendToPopup("failureGetProxyInfo", { error });
       }
     } catch (error) {
@@ -1317,6 +1547,16 @@ class MessageHandler {
     }
   }
 
+  // Clean up old requests periodically
+  cleanupOldRequests() {
+    const now = Date.now();
+    for (const [requestId, requestData] of this.activeRequests.entries()) {
+      if (now - requestData.timestamp > this.requestTimeout) {
+        this.activeRequests.delete(requestId);
+      }
+    }
+  }
+
   deleteAlarm(name) {
     if (browserAPI.alarms?.clear) {
       browserAPI.alarms.clear(name);
@@ -1341,6 +1581,7 @@ class MainProxyManager {
       ) {
         await autoChangeManager.stop();
       } else if (autoChangeManager.isChangingIPActive) {
+        console.log("MainProxyManager: Auto change is changing IP, not stopping");
       }
 
       // Clear internal proxy settings first
@@ -1448,6 +1689,38 @@ class MainProxyManager {
     }
 
     const proxyInfo = await this.buildProxyInfo(response, apiKey, proxyType);
+
+    await browserAPI.storage.sync.set({
+      [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
+      cacheUpdateFlag: {
+        timestamp: Date.now(),
+        source: "changeIP_background",
+        proxyInfo: proxyInfo,
+        needsLocalStorageUpdate: true,
+      },
+    });
+
+    await browserAPI.storage.local.set({
+      proxyInfo: proxyInfo,
+      lastProxyUpdate: Date.now(),
+      cachedProxyInfo: {
+        proxyInfo: proxyInfo,
+        timestamp: Date.now(),
+        version: 1,
+      },
+    });
+
+    try {
+      messageHandler.sendToPopup("successGetProxyInfo", {
+        ...proxyInfo,
+        updateCache: true,
+        cacheSource: "background_while_closed",
+      });
+    } catch (error) {
+      // Popup đã đóng, ignore error
+      console.log("Background: Popup closed, cache updated in storage");
+    }
+
     if (!proxyInfo.public_ip || !proxyInfo.port) {
       messageHandler.sendToPopup("failureGetProxyInfo", {
         error: CONFIG.ERRORS.INVALID_PROXY,
@@ -1456,58 +1729,31 @@ class MainProxyManager {
     }
 
     await this.setProxySettings(proxyInfo);
-    messageHandler.sendToPopup("successGetProxyInfo", proxyInfo);
-  }
 
-  // NEW: Non-invasive proxy response handling for UI refresh
-  async handleProxyResponseNoChange(
-    response,
-    apiKey,
-    proxyType,
-    preserveTimer = false
-  ) {
- 
-    if (!response?.ipv4 && !response?.ipv6) {
-      const error =
-        response?.code === 500
-          ? CONFIG.ERRORS.CONNECTION_FAILED
-          : CONFIG.ERRORS.INVALID_PROXY;
-      messageHandler.sendToPopup("failureGetProxyInfo", { error });
-      return;
-    }
-
-    const proxyInfo = await this.buildProxyInfo(response, apiKey, proxyType);
-    if (!proxyInfo.public_ip || !proxyInfo.port) {
-      messageHandler.sendToPopup("failureGetProxyInfo", {
-        error: CONFIG.ERRORS.INVALID_PROXY,
-      });
-      return;
-    }
-
-    // CRITICAL: NO proxy settings change, only update cache and send to popup
+    // ENHANCED: Always update storage with latest proxy info
     try {
-      // Update storage/cache for consistency
       await browserAPI.storage.sync.set({
         [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
+        cacheUpdateFlag: {
+          timestamp: Date.now(),
+          source: "proxyResponse",
+          proxyInfo: proxyInfo,
+        },
       });
 
-      // Update badge to reflect current state
-      this.setBadgeOn(proxyInfo.location);
+      console.log(
+        "MainProxyManager: Updated proxy cache in handleProxyResponse"
+      );
+    } catch (error) {
+      console.error("MainProxyManager: Error updating proxy cache:", error);
+    }
 
-      // Send to popup with preserve timer flag
+    const autoChangeStatus = autoChangeManager.getStatus();
+    if (!autoChangeStatus.isActive || !autoChangeStatus.isChangingIP) {
       messageHandler.sendToPopup("successGetProxyInfo", {
         ...proxyInfo,
-        preserveTimer: preserveTimer,
-      });
-
-   
-    } catch (error) {
-      console.error(
-        "Background: Error updating proxy info for UI refresh:",
-        error
-      );
-      messageHandler.sendToPopup("failureGetProxyInfo", {
-        error: CONFIG.ERRORS.UNKNOWN_ERROR,
+        updateCache: true,
+        cacheSource: "proxyResponse",
       });
     }
   }
@@ -1577,7 +1823,6 @@ class MainProxyManager {
 
   async disconnectProxyOnly() {
     try {
-
       // Clear internal proxy settings with proper sequencing
       await this.requestManager.clearProxy();
 
@@ -1595,12 +1840,10 @@ class MainProxyManager {
 
           const state = await this.requestManager.loadFirefoxProxyState();
           if (!state) {
-          
             break;
           }
 
           attempts++;
-          
         }
       }
 
@@ -1674,6 +1917,13 @@ browserAPI.runtime.onConnect.addListener((port) => {
     }, 1000);
   });
 });
+
+// NEW: Set up periodic cleanup
+setInterval(() => {
+  if (messageHandler && messageHandler.cleanupOldRequests) {
+    messageHandler.cleanupOldRequests();
+  }
+}, 30000); // Every 30 seconds
 
 // Initialize extension
 const initializeExtension = async () => {
