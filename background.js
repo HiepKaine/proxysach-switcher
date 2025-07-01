@@ -574,6 +574,9 @@ class BrowserProxyManager {
   // NEW: Method to verify proxy state
   static async verifyProxyCleared() {
     try {
+
+      MainProxyManager.setBadgeOff()
+
       if (IS_FIREFOX) {
         // For Firefox, check through ProxyRequestManager
         const proxyState = proxyRequestManager.getCurrentProxy();
