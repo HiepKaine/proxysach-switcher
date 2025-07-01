@@ -427,49 +427,126 @@ class BrowserProxyManager {
     try {
       if (IS_FIREFOX) {
         // Firefox proxy is handled entirely by ProxyRequestManager.process()
+        console.log("BrowserProxyManager: Firefox proxy setup via ProxyRequestManager");
       } else {
         await this.setChromeProxy(config);
+        console.log("BrowserProxyManager: Chrome proxy set successfully");
       }
     } catch (error) {
-      console.error("Error setting browser proxy:", error);
-    }
-  }
-
-  static async setChromeProxy(preferences) {
-    try {
-      const config = { value: {}, scope: "regular" };
-      const proxy = this.findActiveProxy(preferences);
-
-      if (proxy && browserAPI.proxy?.settings) {
-        config.value.mode = "fixed_servers";
-        config.value.rules = this.getSingleProxyRule(proxy);
-        await browserAPI.proxy.settings.set(config);
-      }
-    } catch (error) {
-      console.error("Error setting Chrome proxy:", error);
+      console.error("BrowserProxyManager: Error setting browser proxy:", error);
       throw error;
     }
   }
 
   static async clearBrowserProxy() {
     try {
+      console.log("BrowserProxyManager: Starting clearBrowserProxy...");
+      
       if (IS_FIREFOX) {
-        // Firefox proxy clearing is handled by ProxyRequestManager.clearProxy()
+        // Firefox proxy clearing is handled by ProxyRequestManager
+        console.log("BrowserProxyManager: Firefox proxy clearing via ProxyRequestManager");
+        return true;
       } else {
-        await this.clearChromeProxy();
+        // For Chrome, clear proxy settings
+        const success = await this.clearChromeProxy();
+        if (success) {
+          console.log("BrowserProxyManager: Chrome proxy cleared successfully");
+        } else {
+          console.warn("BrowserProxyManager: Chrome proxy clear may have failed");
+        }
+        return success;
       }
     } catch (error) {
-      console.error("Error clearing browser proxy:", error);
+      console.error("BrowserProxyManager: Error clearing browser proxy:", error);
+      return false;
     }
   }
 
   static async clearChromeProxy() {
     try {
-      if (browserAPI.proxy?.settings) {
-        await browserAPI.proxy.settings.clear({ scope: "regular" });
+      console.log("BrowserProxyManager: Clearing Chrome proxy settings...");
+      
+      if (!browserAPI.proxy?.settings) {
+        console.warn("BrowserProxyManager: browserAPI.proxy.settings not available");
+        return false;
+      }
+
+      // Multiple attempts to clear Chrome proxy
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts) {
+        try {
+          await browserAPI.proxy.settings.clear({ scope: "regular" });
+          console.log(`BrowserProxyManager: Chrome proxy cleared on attempt ${attempts + 1}`);
+          
+          // Verify it was cleared
+          const settings = await browserAPI.proxy.settings.get({ incognito: false });
+          if (settings.value.mode === "direct" || !settings.value.mode) {
+            console.log("BrowserProxyManager: Chrome proxy verified as cleared");
+            return true;
+          } else {
+            console.warn("BrowserProxyManager: Chrome proxy still active after clear:", settings.value);
+          }
+          
+          break;
+        } catch (clearError) {
+          attempts++;
+          console.error(`BrowserProxyManager: Chrome proxy clear attempt ${attempts} failed:`, clearError);
+          
+          if (attempts < maxAttempts) {
+            // Wait before retry
+            await new Promise(resolve => setTimeout(resolve, 200));
+          } else {
+            // Final attempt with direct mode setting
+            try {
+              await browserAPI.proxy.settings.set({
+                value: { mode: "direct" },
+                scope: "regular"
+              });
+              console.log("BrowserProxyManager: Chrome proxy set to direct mode as fallback");
+              return true;
+            } catch (fallbackError) {
+              console.error("BrowserProxyManager: Fallback direct mode setting failed:", fallbackError);
+              throw clearError;
+            }
+          }
+        }
+      }
+      
+      return false;
+    } catch (error) {
+      console.error("BrowserProxyManager: Error in clearChromeProxy:", error);
+      throw error;
+    }
+  }
+
+  static async setChromeProxy(preferences) {
+    try {
+      console.log("BrowserProxyManager: Setting Chrome proxy...");
+      
+      if (!browserAPI.proxy?.settings) {
+        throw new Error("browserAPI.proxy.settings not available");
+      }
+
+      const config = { value: {}, scope: "regular" };
+      const proxy = this.findActiveProxy(preferences);
+
+      if (proxy) {
+        config.value.mode = "fixed_servers";
+        config.value.rules = this.getSingleProxyRule(proxy);
+        
+        await browserAPI.proxy.settings.set(config);
+        console.log("BrowserProxyManager: Chrome proxy set successfully");
+        
+        // Verify it was set
+        const settings = await browserAPI.proxy.settings.get({ incognito: false });
+        console.log("BrowserProxyManager: Chrome proxy verification:", settings.value);
+      } else {
+        throw new Error("No active proxy found in preferences");
       }
     } catch (error) {
-      console.error("Error clearing Chrome proxy:", error);
+      console.error("BrowserProxyManager: Error setting Chrome proxy:", error);
       throw error;
     }
   }
@@ -492,6 +569,32 @@ class BrowserProxyManager {
         port: parseInt(proxy.port),
       },
     };
+  }
+
+  // NEW: Method to verify proxy state
+  static async verifyProxyCleared() {
+    try {
+      if (IS_FIREFOX) {
+        // For Firefox, check through ProxyRequestManager
+        const proxyState = proxyRequestManager.getCurrentProxy();
+        return !proxyState.isActive && !proxyState.firefoxProxyActive;
+      } else {
+        // For Chrome, check proxy settings
+        if (browserAPI.proxy?.settings) {
+          const settings = await browserAPI.proxy.settings.get({ incognito: false });
+          const isCleared = settings.value.mode === "direct" || !settings.value.mode;
+          console.log("BrowserProxyManager: Chrome proxy verification result:", {
+            mode: settings.value.mode,
+            isCleared: isCleared
+          });
+          return isCleared;
+        }
+      }
+      return true;
+    } catch (error) {
+      console.error("BrowserProxyManager: Error verifying proxy state:", error);
+      return false;
+    }
   }
 }
 
