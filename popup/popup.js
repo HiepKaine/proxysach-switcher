@@ -142,39 +142,65 @@ class StorageManager {
         POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO,
         true
       );
+
       if (cachedData && cachedData.proxyInfo) {
         const proxyInfo = cachedData.proxyInfo;
-        // Check expiration times
-        const currentTime = Math.floor(Date.now() / 1000); // Current time in seconds
+
+        // Get current time in seconds
+        const currentTime = Math.floor(Date.now() / 1000);
 
         // Check key expiration first (higher priority)
-        if (
-          proxyInfo.expired &&
-          currentTime >= Math.floor(Date.now(proxyInfo.expired) / 1000)
-        ) {
-          this.clearCachedProxyInfo("Key expired");
-          return {
-            expired: "key",
-            error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED,
-          };
+        if (proxyInfo.expired) {
+          const expiredTimestamp = TimeUtils.convertToTimestamp(
+            proxyInfo.expired
+          );
+
+          if (expiredTimestamp > 0 && currentTime >= expiredTimestamp) {
+            console.log("StorageManager: Key expired", {
+              current: currentTime,
+              expired: expiredTimestamp,
+              expiredValue: proxyInfo.expired,
+              currentDate: new Date(currentTime * 1000).toLocaleString(),
+              expiredDate: new Date(expiredTimestamp * 1000).toLocaleString(),
+            });
+
+            this.clearCachedProxyInfo("key expired");
+            return {
+              expired: "key",
+              error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED,
+            };
+          }
         }
 
         // Check proxy timeout
-        if (
-          proxyInfo.proxyTimeout &&
-          currentTime >= Math.floor(Date.now(proxyInfo.proxyTimeout) / 1000)
-        ) {
-          this.clearCachedProxyInfo("Proxy timeout");
-          return {
-            expired: "proxy",
-            error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED,
-          };
+        if (proxyInfo.proxyTimeout) {
+          const timeoutTimestamp = TimeUtils.convertToTimestamp(
+            proxyInfo.proxyTimeout
+          );
+
+          if (timeoutTimestamp > 0 && currentTime >= timeoutTimestamp) {
+            console.log("StorageManager: Proxy timeout", {
+              current: currentTime,
+              timeout: timeoutTimestamp,
+              timeoutValue: proxyInfo.proxyTimeout,
+              currentDate: new Date(currentTime * 1000).toLocaleString(),
+              timeoutDate: new Date(timeoutTimestamp * 1000).toLocaleString(),
+            });
+
+            this.clearCachedProxyInfo("proxy timeout");
+            return {
+              expired: "proxy",
+              error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED,
+            };
+          }
         }
 
         return proxyInfo;
       }
+
       return null;
     } catch (error) {
+      console.error("StorageManager: Error in getCachedProxyInfo:", error);
       return null;
     }
   }
@@ -209,7 +235,7 @@ class StorageManager {
         );
       }
 
-      ProxyManager.directProxy();
+      ProxyManager.directProxy(reason);
       this.remove(POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO);
     } catch (error) {}
   }
@@ -335,6 +361,116 @@ class ChromeStorageManager {
     try {
       await browserAPI.storage.sync.set({ [key]: value });
     } catch (error) {}
+  }
+}
+class TimeUtils {
+  /**
+   * Convert thời gian từ API format "14:20:30 02/07/2025" thành timestamp (seconds)
+   * @param {string} timeString - Thời gian từ API
+   * @returns {number} - Timestamp trong seconds, hoặc 0 nếu invalid
+   */
+  static convertAPITimeToTimestamp(timeString) {
+    try {
+      if (!timeString || typeof timeString !== "string") {
+        return 0;
+      }
+
+      // Parse format "14:20:30 02/07/2025"
+      const parts = timeString.trim().split(" ");
+      if (parts.length !== 2) {
+        return 0;
+      }
+
+      const [timePart, datePart] = parts;
+
+      // Parse time part "14:20:30"
+      const timeComponents = timePart.split(":");
+      if (timeComponents.length !== 3) {
+        return 0;
+      }
+
+      const [hours, minutes, seconds] = timeComponents.map((x) =>
+        parseInt(x, 10)
+      );
+
+      // Parse date part "02/07/2025"
+      const dateComponents = datePart.split("/");
+      if (dateComponents.length !== 3) {
+        return 0;
+      }
+
+      const [day, month, year] = dateComponents.map((x) => parseInt(x, 10));
+
+      // Validate ranges
+      if (
+        hours < 0 ||
+        hours > 23 ||
+        minutes < 0 ||
+        minutes > 59 ||
+        seconds < 0 ||
+        seconds > 59 ||
+        day < 1 ||
+        day > 31 ||
+        month < 1 ||
+        month > 12 ||
+        year < 2020 ||
+        year > 2100
+      ) {
+        return 0;
+      }
+
+      // Create Date object (month is 0-indexed in JS)
+      const date = new Date(year, month - 1, day, hours, minutes, seconds);
+
+      // Check if date is valid
+      if (isNaN(date.getTime())) {
+        return 0;
+      }
+
+      // Return timestamp in seconds
+      return Math.floor(date.getTime() / 1000);
+    } catch (error) {
+      console.error("TimeUtils: Error converting API time:", error);
+      return 0;
+    }
+  }
+
+  /**
+   * Convert timestamp number thành timestamp (seconds)
+   * @param {number} timestamp - Timestamp number
+   * @returns {number} - Timestamp trong seconds
+   */
+  static convertTimestampToSeconds(timestamp) {
+    try {
+      if (!timestamp || typeof timestamp !== "number") {
+        return 0;
+      }
+
+      // Nếu timestamp có vẻ là milliseconds (> 1000000000000), convert thành seconds
+      if (timestamp > 1000000000000) {
+        return Math.floor(timestamp / 1000);
+      }
+
+      // Nếu đã là seconds, return as is
+      return Math.floor(timestamp);
+    } catch (error) {
+      console.error("TimeUtils: Error converting timestamp:", error);
+      return 0;
+    }
+  }
+
+  /**
+   * Convert bất kỳ format thời gian nào thành timestamp (seconds)
+   * @param {string|number} timeValue - Thời gian từ API
+   * @returns {number} - Timestamp trong seconds
+   */
+  static convertToTimestamp(timeValue) {
+    if (typeof timeValue === "string") {
+      return this.convertAPITimeToTimestamp(timeValue);
+    } else if (typeof timeValue === "number") {
+      return this.convertTimestampToSeconds(timeValue);
+    }
+    return 0;
   }
 }
 
@@ -604,7 +740,7 @@ class TimerManager {
       if (this.totalTimeChangeIp < 0) {
         this.clearTimeChangeCountdown();
         this.showChangingIPStatus();
-        
+
         await this.handleTimerExpiredWithActualChange();
         return;
       }
@@ -802,7 +938,9 @@ class TimerManager {
         return;
       }
 
-      const proxyConnected = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      const proxyConnected = StorageManager.get(
+        POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
+      );
       if (proxyConnected !== "true") {
         await this.resetToDefaultTime();
         return;
@@ -828,7 +966,6 @@ class TimerManager {
         POPUP_CONFIG.BACKGROUND_MESSAGES.AUTO_CHANGE_IP,
         config
       );
-
     } catch (error) {
       await this.resetToDefaultTime();
     } finally {
@@ -857,7 +994,6 @@ class TimerManager {
           }
           return;
         }
-
       } catch (error) {
         break;
       }
@@ -916,7 +1052,7 @@ class TimerManager {
 
     this.stopSyncCheck();
     this.markPopupInactive();
-    
+
     this.isProcessingExpiredTimer = false;
   }
 
@@ -1008,7 +1144,7 @@ class TimerManager {
       const resetTime = parseInt(defaultTime);
 
       this.clearTimeChangeCountdown();
-      
+
       await this.sleep(200);
 
       this.startTimeChangeCountdownWithTime(resetTime);
@@ -1484,7 +1620,7 @@ class LocationManager {
     }
 
     const cachedProxyInfo = StorageManager.getCachedProxyInfo();
-    
+
     if (!cachedProxyInfo) {
       return false;
     }
@@ -1949,36 +2085,55 @@ class ProxyManager {
 
     const currentTime = Math.floor(Date.now() / 1000);
 
-    if (
-      proxyData.expired &&
-      currentTime >= Math.floor(Date.now(proxyData.expired) / 1000)
-    ) {
-      UIManager.showError({
-        data: {
-          error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED.replace("• ", ""),
-        },
-      });
-      setTimeout(async () => {
-        await LocationManager.forceDisconnectProxy("Key expired");
-      }, 1000);
-      return;
+    // FIXED: Sử dụng TimeUtils để convert thời gian
+    if (proxyData.expired) {
+      const expiredTimestamp = TimeUtils.convertToTimestamp(proxyData.expired);
+      if (expiredTimestamp > 0 && currentTime >= expiredTimestamp) {
+        console.log("ProxyManager: Key expired in handleSuccessfulConnection", {
+          current: currentTime,
+          expired: expiredTimestamp,
+          expiredValue: proxyData.expired,
+        });
+
+        UIManager.showError({
+          data: {
+            error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED.replace("• ", ""),
+          },
+        });
+        setTimeout(async () => {
+          await LocationManager.forceDisconnectProxy("Key expired");
+        }, 1000);
+        return;
+      }
     }
 
-    if (
-      proxyData.proxyTimeout &&
-      currentTime >= Math.floor(Date.now(proxyData.proxyTimeout) / 1000)
-    ) {
-      UIManager.showError({
-        data: {
-          error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED.replace("• ", ""),
-        },
-      });
-      setTimeout(async () => {
-        await LocationManager.forceDisconnectProxy("Proxy timeout");
-      }, 1000);
-      return;
+    if (proxyData.proxyTimeout) {
+      const timeoutTimestamp = TimeUtils.convertToTimestamp(
+        proxyData.proxyTimeout
+      );
+      if (timeoutTimestamp > 0 && currentTime >= timeoutTimestamp) {
+        console.log(
+          "ProxyManager: Proxy timeout in handleSuccessfulConnection",
+          {
+            current: currentTime,
+            timeout: timeoutTimestamp,
+            timeoutValue: proxyData.proxyTimeout,
+          }
+        );
+
+        UIManager.showError({
+          data: {
+            error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED.replace("• ", ""),
+          },
+        });
+        setTimeout(async () => {
+          await LocationManager.forceDisconnectProxy("Proxy timeout");
+        }, 1000);
+        return;
+      }
     }
 
+    // Tiếp tục với logic cũ...
     setTimeout(async () => {
       const cacheUpdateSuccess = this.updateProxyCache(
         proxyData,
@@ -2102,7 +2257,7 @@ class ProxyManager {
     }
   }
 
-  static async directProxy() {
+  static async directProxy(reason) {
     timerManager.forceStopAll();
 
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
@@ -2113,7 +2268,11 @@ class ProxyManager {
       POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
     );
 
-    StorageManager.clearCachedProxyInfo();
+    console.log(`Disconnecting proxy due to: ${reason}`);
+
+    if (reason !== "key expired" && reason !== "proxy timeout") {
+      StorageManager.clearCachedProxyInfo();
+    }
 
     timerManager.clearNextTimeChangeState();
 
@@ -2249,7 +2408,7 @@ class AppInitializer {
       }
 
       this.isInitializing = true;
-      
+
       timerManager.forceStopAll();
       UIManager.setNotConnectedStatus();
 
@@ -2326,7 +2485,7 @@ class AppInitializer {
 
   static async handleProtectedState(backgroundData) {
     UIManager.showProcessingNewIpConnectProtected();
-    
+
     let attempts = 0;
     const maxAttempts = 30;
 
@@ -2343,7 +2502,6 @@ class AppInitializer {
           await this.continueInitialization(status);
           return;
         }
-
       } catch (error) {
         break;
       }
@@ -2354,7 +2512,7 @@ class AppInitializer {
 
   static async handleChangingState(backgroundData) {
     UIManager.showProcessingNewIpConnect();
-    
+
     let attempts = 0;
     const maxAttempts = 60;
 
@@ -2371,7 +2529,6 @@ class AppInitializer {
           await this.continueInitialization(status);
           return;
         }
-
       } catch (error) {
         break;
       }
@@ -2391,17 +2548,22 @@ class AppInitializer {
 
       ChangeIPManager.init();
 
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 500));
 
-      const proxyConnected = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
-      const isAutoChangeIP = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+      const proxyConnected = StorageManager.get(
+        POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
+      );
+      const isAutoChangeIP = StorageManager.get(
+        POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
+      );
 
       let timerInitialized = false;
 
-      if (proxyConnected === "true" && 
-          JSON.parse(isAutoChangeIP) && 
-          ChangeIPManager.isChangeIPAllowed()) {
-        
+      if (
+        proxyConnected === "true" &&
+        JSON.parse(isAutoChangeIP) &&
+        ChangeIPManager.isChangeIPAllowed()
+      ) {
         if (backgroundData && backgroundData.isActive) {
           const now = Date.now();
           const timeSinceLastUpdate = Math.floor(
@@ -2423,7 +2585,7 @@ class AppInitializer {
         }
 
         if (timerInitialized) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 500));
         }
       }
 
@@ -2431,10 +2593,11 @@ class AppInitializer {
         // NEW: Check expiration again before loading proxy info
         const expiredHandled = await LocationManager.checkAndHandleExpiration();
         if (!expiredHandled) {
-          await LocationManager.getProxyInfoIfConnectedSafeNoAPI(timerInitialized);
+          await LocationManager.getProxyInfoIfConnectedSafeNoAPI(
+            timerInitialized
+          );
         }
       }
-
     } catch (error) {
       this.showInitializationError();
     }
@@ -2478,16 +2641,23 @@ class AppInitializer {
 
   static async checkFallbackCacheSources(syncResult) {
     try {
-      const localResult = await browserAPI.storage.local.get(["cachedProxyInfo"]);
-      
-      if (localResult.cachedProxyInfo && localResult.cachedProxyInfo.proxyInfo) {
+      const localResult = await browserAPI.storage.local.get([
+        "cachedProxyInfo",
+      ]);
+
+      if (
+        localResult.cachedProxyInfo &&
+        localResult.cachedProxyInfo.proxyInfo
+      ) {
         const localCache = StorageManager.getCachedProxyInfo();
         const localTimestamp = localResult.cachedProxyInfo.timestamp || 0;
         const currentTimestamp =
           localCache && localCache.timestamp ? localCache.timestamp : 0;
 
         if (localTimestamp > currentTimestamp) {
-          StorageManager.setCachedProxyInfo(localResult.cachedProxyInfo.proxyInfo);
+          StorageManager.setCachedProxyInfo(
+            localResult.cachedProxyInfo.proxyInfo
+          );
           return true;
         }
       }
@@ -2515,7 +2685,7 @@ class AppInitializer {
       statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
       statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
     }
-    
+
     UIManager.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
     UIManager.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT);
   }
