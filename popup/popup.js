@@ -15,7 +15,6 @@ const POPUP_CONFIG = {
     CACHED_PROXY_INFO: "cachedProxyInfo",
     CACHED_LOCATIONS: "cachedLocations",
     NEXT_CHANGE_TARGET: "nextChangeTarget",
-    NEXT_CHANGE_DURATION: "nextChangeDuration",
   },
   MESSAGES: {
     GET_LOCATIONS_SUCCESS: "getLocationsSuccess",
@@ -77,8 +76,8 @@ const POPUP_CONFIG = {
 
 const IS_FIREFOX =
   typeof browser !== "undefined" || navigator.userAgent.includes("Firefox");
-const IS_CHROME = !IS_FIREFOX;
 
+// Storage Manager
 class StorageManager {
   static set(key, value) {
     try {
@@ -104,12 +103,6 @@ class StorageManager {
     } catch (error) {}
   }
 
-  static clear() {
-    try {
-      localStorage.clear();
-    } catch (error) {}
-  }
-
   static setCachedProxyInfo(proxyInfo) {
     try {
       const cachedData = {
@@ -118,21 +111,6 @@ class StorageManager {
         version: 1,
       };
       this.set(POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO, cachedData);
-    } catch (error) {}
-  }
-
-  static updateCachedProxyInfoTimerExpired() {
-    try {
-      const cachedData = this.get(
-        POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO,
-        true
-      );
-      if (cachedData && cachedData.proxyInfo) {
-        cachedData.proxyInfo.nextChangeIP = 0;
-        cachedData.proxyInfo.nextChangeExpired = true;
-        cachedData.timestamp = Date.now();
-        this.set(POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO, cachedData);
-      }
     } catch (error) {}
   }
 
@@ -145,25 +123,14 @@ class StorageManager {
 
       if (cachedData && cachedData.proxyInfo) {
         const proxyInfo = cachedData.proxyInfo;
-
-        // Get current time in seconds
         const currentTime = Math.floor(Date.now() / 1000);
 
-        // Check key expiration first (higher priority)
+        // Check key expiration
         if (proxyInfo.expired) {
           const expiredTimestamp = TimeUtils.convertToTimestamp(
             proxyInfo.expired
           );
-
           if (expiredTimestamp > 0 && currentTime >= expiredTimestamp) {
-            console.log("StorageManager: Key expired", {
-              current: currentTime,
-              expired: expiredTimestamp,
-              expiredValue: proxyInfo.expired,
-              currentDate: new Date(currentTime * 1000).toLocaleString(),
-              expiredDate: new Date(expiredTimestamp * 1000).toLocaleString(),
-            });
-
             this.clearCachedProxyInfo("key expired");
             return {
               expired: "key",
@@ -177,16 +144,7 @@ class StorageManager {
           const timeoutTimestamp = TimeUtils.convertToTimestamp(
             proxyInfo.proxyTimeout
           );
-
           if (timeoutTimestamp > 0 && currentTime >= timeoutTimestamp) {
-            console.log("StorageManager: Proxy timeout", {
-              current: currentTime,
-              timeout: timeoutTimestamp,
-              timeoutValue: proxyInfo.proxyTimeout,
-              currentDate: new Date(currentTime * 1000).toLocaleString(),
-              timeoutDate: new Date(timeoutTimestamp * 1000).toLocaleString(),
-            });
-
             this.clearCachedProxyInfo("proxy timeout");
             return {
               expired: "proxy",
@@ -200,7 +158,6 @@ class StorageManager {
 
       return null;
     } catch (error) {
-      console.error("StorageManager: Error in getCachedProxyInfo:", error);
       return null;
     }
   }
@@ -214,13 +171,10 @@ class StorageManager {
       };
 
       if (IS_FIREFOX) {
-        // For Firefox, send force disconnect first
         MessageHandler.sendToBackground(
           POPUP_CONFIG.BACKGROUND_MESSAGES.FORCE_DISCONNECT,
           config
         );
-
-        // Small delay then send cancel all
         setTimeout(() => {
           MessageHandler.sendToBackground(
             POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
@@ -228,14 +182,13 @@ class StorageManager {
           );
         }, 200);
       } else {
-        // For Chrome, send cancel all
         MessageHandler.sendToBackground(
           POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
           config
         );
       }
 
-      ProxyManager.directProxy(reason);
+      // Only call directProxy without badge update
       this.remove(POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO);
     } catch (error) {}
   }
@@ -264,12 +217,6 @@ class StorageManager {
     } catch (error) {
       return null;
     }
-  }
-
-  static clearCachedLocations() {
-    try {
-      this.remove(POPUP_CONFIG.STORAGE_KEYS.CACHED_LOCATIONS);
-    } catch (error) {}
   }
 
   static setNextChangeTimer(targetTime, duration) {
@@ -330,20 +277,9 @@ class StorageManager {
       this.remove(POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET);
     } catch (error) {}
   }
-
-  static wasNextChangeTimerExpired() {
-    try {
-      const timerData = this.get(
-        POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET,
-        true
-      );
-      return timerData && timerData.expired;
-    } catch (error) {
-      return false;
-    }
-  }
 }
 
+// Chrome Storage Manager
 class ChromeStorageManager {
   static async get(key) {
     return new Promise((resolve) => {
@@ -363,45 +299,28 @@ class ChromeStorageManager {
     } catch (error) {}
   }
 }
+
+// Time Utils
 class TimeUtils {
-  /**
-   * Convert thời gian từ API format "14:20:30 02/07/2025" thành timestamp (seconds)
-   * @param {string} timeString - Thời gian từ API
-   * @returns {number} - Timestamp trong seconds, hoặc 0 nếu invalid
-   */
   static convertAPITimeToTimestamp(timeString) {
     try {
-      if (!timeString || typeof timeString !== "string") {
-        return 0;
-      }
+      if (!timeString || typeof timeString !== "string") return 0;
 
-      // Parse format "14:20:30 02/07/2025"
       const parts = timeString.trim().split(" ");
-      if (parts.length !== 2) {
-        return 0;
-      }
+      if (parts.length !== 2) return 0;
 
       const [timePart, datePart] = parts;
-
-      // Parse time part "14:20:30"
       const timeComponents = timePart.split(":");
-      if (timeComponents.length !== 3) {
-        return 0;
-      }
+      if (timeComponents.length !== 3) return 0;
 
       const [hours, minutes, seconds] = timeComponents.map((x) =>
         parseInt(x, 10)
       );
-
-      // Parse date part "02/07/2025"
       const dateComponents = datePart.split("/");
-      if (dateComponents.length !== 3) {
-        return 0;
-      }
+      if (dateComponents.length !== 3) return 0;
 
       const [day, month, year] = dateComponents.map((x) => parseInt(x, 10));
 
-      // Validate ranges
       if (
         hours < 0 ||
         hours > 23 ||
@@ -419,51 +338,27 @@ class TimeUtils {
         return 0;
       }
 
-      // Create Date object (month is 0-indexed in JS)
       const date = new Date(year, month - 1, day, hours, minutes, seconds);
+      if (isNaN(date.getTime())) return 0;
 
-      // Check if date is valid
-      if (isNaN(date.getTime())) {
-        return 0;
-      }
-
-      // Return timestamp in seconds
       return Math.floor(date.getTime() / 1000);
     } catch (error) {
-      console.error("TimeUtils: Error converting API time:", error);
       return 0;
     }
   }
 
-  /**
-   * Convert timestamp number thành timestamp (seconds)
-   * @param {number} timestamp - Timestamp number
-   * @returns {number} - Timestamp trong seconds
-   */
   static convertTimestampToSeconds(timestamp) {
     try {
-      if (!timestamp || typeof timestamp !== "number") {
-        return 0;
-      }
-
-      // Nếu timestamp có vẻ là milliseconds (> 1000000000000), convert thành seconds
+      if (!timestamp || typeof timestamp !== "number") return 0;
       if (timestamp > 1000000000000) {
         return Math.floor(timestamp / 1000);
       }
-
-      // Nếu đã là seconds, return as is
       return Math.floor(timestamp);
     } catch (error) {
-      console.error("TimeUtils: Error converting timestamp:", error);
       return 0;
     }
   }
 
-  /**
-   * Convert bất kỳ format thời gian nào thành timestamp (seconds)
-   * @param {string|number} timeValue - Thời gian từ API
-   * @returns {number} - Timestamp trong seconds
-   */
   static convertToTimestamp(timeValue) {
     if (typeof timeValue === "string") {
       return this.convertAPITimeToTimestamp(timeValue);
@@ -474,6 +369,7 @@ class TimeUtils {
   }
 }
 
+// Message Handler
 class MessageHandler {
   static async sendToBackground(message, data = {}) {
     try {
@@ -485,37 +381,17 @@ class MessageHandler {
       ];
 
       if (oneWayMessages.includes(message)) {
-        try {
-          browserAPI.runtime.sendMessage({ greeting: message, data });
-        } catch (error) {}
+        browserAPI.runtime.sendMessage({ greeting: message, data });
         return null;
-      } else {
-        return await Promise.race([
-          browserAPI.runtime.sendMessage({ greeting: message, data }),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Message timeout")), 5000)
-          ),
-        ]);
       }
+
+      return await Promise.race([
+        browserAPI.runtime.sendMessage({ greeting: message, data }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Message timeout")), 5000)
+        ),
+      ]);
     } catch (error) {
-      if (error.message.includes("Receiving end does not exist")) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-
-        try {
-          if (oneWayMessages.includes(message)) {
-            browserAPI.runtime.sendMessage({ greeting: message, data });
-            return null;
-          } else {
-            return await browserAPI.runtime.sendMessage({
-              greeting: message,
-              data,
-            });
-          }
-        } catch (retryError) {
-          return null;
-        }
-      }
-
       return null;
     }
   }
@@ -538,76 +414,23 @@ class MessageHandler {
           break;
         case POPUP_CONFIG.MESSAGES.FAILURE_GET_PROXY_INFO:
           UIManager.showError(request);
+          // Chỉ set badge Off khi thực sự fail
+          BadgeManager.setBadgeOff();
           break;
         case POPUP_CONFIG.MESSAGES.SUCCESS_GET_PROXY_INFO:
           const preserveTimer = request.data?.preserveTimer || false;
-          const updateCache = request.data?.updateCache || false;
-          const cacheSource = request.data?.cacheSource || "background";
-
-          const {
-            preserveTimer: _,
-            updateCache: __,
-            cacheSource: ___,
-            ...cleanData
-          } = request.data || {};
-
-          if (updateCache) {
-            cleanData.updateCache = true;
-            cleanData.cacheSource = cacheSource;
-          }
-
-          ProxyManager.handleSuccessfulConnection(cleanData, preserveTimer);
+          ProxyManager.handleSuccessfulConnection(request.data, preserveTimer);
           break;
         case POPUP_CONFIG.MESSAGES.SUCCESS_GET_INFO_KEY:
           ProxyManager.handleInfoKeySuccess(request.data);
           break;
         case POPUP_CONFIG.MESSAGES.DISCONNECT_PROXY:
-          ProxyManager.directProxy();
+          ProxyManager.directProxy("message_disconnect");
+          // Set badge Off khi nhận lệnh disconnect
+          BadgeManager.setBadgeOff();
           break;
-        default:
       }
     });
-
-    if (browserAPI.storage && browserAPI.storage.onChanged) {
-      browserAPI.storage.onChanged.addListener((changes, namespace) => {
-        if (namespace === "sync" && changes.cacheUpdateFlag) {
-          const cacheUpdate = changes.cacheUpdateFlag.newValue;
-
-          if (cacheUpdate && cacheUpdate.proxyInfo && cacheUpdate.timestamp) {
-            const now = Date.now();
-            const updateAge = now - cacheUpdate.timestamp;
-
-            if (updateAge < 5000) {
-              StorageManager.setCachedProxyInfo(cacheUpdate.proxyInfo);
-
-              const proxyConnected = StorageManager.get(
-                POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
-              );
-
-              if (proxyConnected === "true") {
-                UIManager.showProxyInfo(cacheUpdate.proxyInfo, false, true);
-                ProxyManager.updateProxyUIStatus();
-              }
-            }
-          }
-        }
-      });
-    }
-  }
-
-  static async checkBackgroundConnection() {
-    try {
-      const response = await Promise.race([
-        browserAPI.runtime.sendMessage({ greeting: "ping", data: {} }),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Ping timeout")), 1000)
-        ),
-      ]);
-
-      return response && response.pong;
-    } catch (error) {
-      return false;
-    }
   }
 
   static async sendToBackgroundSafe(message, data = {}) {
@@ -630,81 +453,27 @@ class MessageHandler {
   }
 }
 
+// Timer Manager - FIXED to prevent infinite loops
 class TimerManager {
   constructor() {
     this.nextTimeChange = null;
     this.timeChangeIP = null;
     this.countDowntime = 0;
     this.totalTimeChangeIp = 0;
-    this.autoChangeInterval = 0;
-    this.isRestoringTimer = false;
-    this.lastUpdateTime = 0;
-    this.isPopupControlling = false;
-    this.lastNotificationTime = 0;
-    this.notificationDebounceTime = 2000;
     this.syncCheckInterval = null;
-    this.isInitialized = false;
     this.isProcessingExpiredTimer = false;
-    this.lastExpiredProcessTime = 0;
-  }
-
-  async syncWithBackground() {
-    try {
-      const response = await Promise.race([
-        browserAPI.runtime.sendMessage({
-          greeting: "getBackgroundTimerStatus",
-          data: {},
-        }),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Sync timeout")), 3000)
-        ),
-      ]);
-
-      if (response && response.isActive) {
-        if (response.isChangingIP || response.isProtected) {
-          return { status: "changing", data: response };
-        }
-
-        const now = Date.now();
-        const timeSinceLastUpdate = Math.floor(
-          (now - response.lastUpdateTime) / 1000
-        );
-        const realRemainingTime = Math.max(
-          0,
-          response.remainingTime - timeSinceLastUpdate
-        );
-
-        return {
-          status: "success",
-          remainingTime: realRemainingTime,
-          data: response,
-        };
-      } else {
-        return { status: "inactive" };
-      }
-    } catch (error) {
-      return { status: "error" };
-    }
+    this.isPopupControlling = false;
+    this.isInitialized = false;
+    this.waitAttempts = 0; // Prevent infinite waiting
+    this.maxWaitAttempts = 30;
   }
 
   startTimeChangeCountdownWithTime(confirmedTime) {
-    if (this.isProcessingExpiredTimer) {
-      return false;
-    }
-
-    if (
-      this.timeChangeIP &&
-      this.isPopupControlling &&
-      Math.abs(this.totalTimeChangeIp - confirmedTime) <= 3
-    ) {
-      return true;
-    }
+    if (this.isProcessingExpiredTimer) return false;
 
     this.clearTimeChangeCountdown();
 
-    if (!confirmedTime || confirmedTime <= 0) {
-      return false;
-    }
+    if (!confirmedTime || confirmedTime <= 0) return false;
 
     this.totalTimeChangeIp = confirmedTime;
     this.isPopupControlling = true;
@@ -733,14 +502,10 @@ class TimerManager {
 
       element.value = `${this.totalTimeChangeIp}`;
       this.totalTimeChangeIp--;
-      this.lastUpdateTime = Date.now();
-
-      this.updatePopupActivity();
 
       if (this.totalTimeChangeIp < 0) {
         this.clearTimeChangeCountdown();
         this.showChangingIPStatus();
-
         await this.handleTimerExpiredWithActualChange();
         return;
       }
@@ -760,63 +525,6 @@ class TimerManager {
     return true;
   }
 
-  async initializeTimer() {
-    if (this.isInitialized) {
-      return false;
-    }
-
-    const isAutoChangeIP = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-    );
-    const proxyConnected = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
-    );
-
-    if (!JSON.parse(isAutoChangeIP) || proxyConnected !== "true") {
-      this.isInitialized = true;
-      return false;
-    }
-
-    if (this.isInitializing) {
-      return false;
-    }
-
-    this.isInitializing = true;
-
-    try {
-      const syncResult = await this.syncWithBackground();
-
-      if (syncResult.status === "success" && syncResult.remainingTime > 0) {
-        this.startTimeChangeCountdownWithTime(syncResult.remainingTime + 1);
-        this.isInitialized = true;
-        return true;
-      } else if (syncResult.status === "changing") {
-        this.showChangingIPStatus();
-        this.isInitialized = true;
-        return true;
-      } else if (syncResult.status === "inactive") {
-        const defaultTime = StorageManager.get(
-          POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-        );
-
-        if (defaultTime) {
-          const time = parseInt(defaultTime);
-          this.startTimeChangeCountdownWithTime(time);
-          this.isInitialized = true;
-          return true;
-        }
-      }
-
-      this.isInitialized = true;
-      return false;
-    } catch (error) {
-      this.isInitialized = true;
-      return false;
-    } finally {
-      this.isInitializing = false;
-    }
-  }
-
   startSyncCheck() {
     this.stopSyncCheck();
 
@@ -834,11 +542,12 @@ class TimerManager {
           ),
         ]);
 
-        if (response && response.isActive) {
-          if (response.isChangingIP || response.isProtected) {
-            return;
-          }
-
+        if (
+          response &&
+          response.isActive &&
+          !response.isChangingIP &&
+          !response.isProtected
+        ) {
           const now = Date.now();
           const timeSinceLastUpdate = Math.floor(
             (now - response.lastUpdateTime) / 1000
@@ -847,12 +556,10 @@ class TimerManager {
             0,
             response.remainingTime - timeSinceLastUpdate
           );
-
           const timeDiff = Math.abs(this.totalTimeChangeIp - realRemainingTime);
 
           if (timeDiff > 5 && this.totalTimeChangeIp > 10) {
             this.totalTimeChangeIp = realRemainingTime;
-
             const element = document.getElementById(
               POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
             );
@@ -861,9 +568,7 @@ class TimerManager {
             }
           }
         }
-      } catch (error) {
-        // Ignore sync errors
-      }
+      } catch (error) {}
     }, 2000);
   }
 
@@ -883,36 +588,16 @@ class TimerManager {
     }
   }
 
-  clearNextTimeChangeState() {
-    this.clearCountDown();
-    this.countDowntime = 0;
-    StorageManager.clearNextChangeTimer();
-    const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME);
-    if (element) {
-      element.innerText = "0 s";
-    }
-  }
-
   async handleTimerExpiredWithActualChange() {
-    if (this.isProcessingExpiredTimer) {
-      return;
-    }
+    if (this.isProcessingExpiredTimer) return;
 
     const now = Date.now();
-    if (now - this.lastExpiredProcessTime < 5000) {
-      return;
-    }
-
     this.isProcessingExpiredTimer = true;
-    this.lastExpiredProcessTime = now;
 
     try {
-      const backgroundStatus = await Promise.race([
-        MessageHandler.sendToBackground("getBackgroundTimerStatus"),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Background status timeout")), 2000)
-        ),
-      ]);
+      const backgroundStatus = await MessageHandler.sendToBackground(
+        "getBackgroundTimerStatus"
+      );
 
       if (backgroundStatus) {
         if (backgroundStatus.isChangingIP || backgroundStatus.isProtected) {
@@ -974,14 +659,13 @@ class TimerManager {
   }
 
   async waitForBackgroundCompletion() {
-    let attempts = 0;
-    const maxAttempts = 30;
+    this.waitAttempts = 0;
 
-    while (attempts < maxAttempts) {
+    while (this.waitAttempts < this.maxWaitAttempts) {
+      await this.sleep(1000);
+      this.waitAttempts++;
+
       try {
-        await this.sleep(1000);
-        attempts++;
-
         const status = await MessageHandler.sendToBackground(
           "getBackgroundTimerStatus"
         );
@@ -1002,48 +686,6 @@ class TimerManager {
     await this.resetToDefaultTime();
   }
 
-  async handleTimerExpiredWithWait() {
-    try {
-      let attempts = 0;
-      const maxAttempts = 30;
-
-      while (attempts < maxAttempts) {
-        await this.sleep(1000);
-        attempts++;
-
-        try {
-          const response = await browserAPI.runtime.sendMessage({
-            greeting: "getBackgroundTimerStatus",
-            data: {},
-          });
-
-          if (
-            response &&
-            response.isActive &&
-            response.remainingTime > 0 &&
-            response.remainingTime < response.originalDuration
-          ) {
-            const now = Date.now();
-            const timeSinceLastUpdate = Math.floor(
-              (now - response.lastUpdateTime) / 1000
-            );
-            const realRemainingTime = Math.max(
-              0,
-              response.remainingTime - timeSinceLastUpdate
-            );
-
-            this.startTimeChangeCountdownWithTime(realRemainingTime);
-            return;
-          }
-        } catch (error) {}
-      }
-
-      await this.resetToDefaultTime();
-    } catch (error) {
-      await this.resetToDefaultTime();
-    }
-  }
-
   clearTimeChangeCountdown() {
     if (this.timeChangeIP) {
       clearInterval(this.timeChangeIP);
@@ -1051,8 +693,6 @@ class TimerManager {
     }
 
     this.stopSyncCheck();
-    this.markPopupInactive();
-
     this.isProcessingExpiredTimer = false;
   }
 
@@ -1060,76 +700,15 @@ class TimerManager {
     this.clearCountDown();
     this.clearTimeChangeCountdown();
     this.stopSyncCheck();
-    this.clearNextTimeChangeState();
     this.countDowntime = 0;
     this.totalTimeChangeIp = 0;
-    this.autoChangeInterval = 0;
-    this.isRestoringTimer = false;
     this.isPopupControlling = false;
     this.isInitialized = false;
-    this.markPopupInactive();
-  }
-
-  clearNextTimeChangeOnly() {
-    this.clearCountDown();
-    this.countDowntime = 0;
-    StorageManager.clearNextChangeTimer();
-    const element = document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME);
-    if (element) {
-      element.innerText = "0 s";
-    }
-  }
-
-  forceStopAll() {
-    if (this.nextTimeChange) {
-      clearInterval(this.nextTimeChange);
-      this.nextTimeChange = null;
-    }
-
-    if (this.timeChangeIP) {
-      clearInterval(this.timeChangeIP);
-      this.timeChangeIP = null;
-    }
-
-    this.stopSyncCheck();
-
-    this.countDowntime = 0;
-    this.totalTimeChangeIp = 0;
-    this.autoChangeInterval = 0;
-    this.isRestoringTimer = false;
-    this.isPopupControlling = false;
-    this.lastUpdateTime = 0;
-    this.lastNotificationTime = 0;
-    this.isInitialized = false;
-    this.isProcessingExpiredTimer = false;
-
-    this.markPopupInactive();
+    this.waitAttempts = 0;
   }
 
   sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  updatePopupActivity() {
-    try {
-      browserAPI.storage.local.set({
-        popupTimerActive: true,
-        popupLastUpdate: Date.now(),
-        popupTimerValue: this.totalTimeChangeIp,
-        popupControlling: this.isPopupControlling,
-      });
-    } catch (error) {}
-  }
-
-  markPopupInactive() {
-    this.isPopupControlling = false;
-    try {
-      browserAPI.storage.local.set({
-        popupTimerActive: false,
-        popupLastUpdate: Date.now(),
-        popupControlling: false,
-      });
-    } catch (error) {}
   }
 
   async resetToDefaultTime() {
@@ -1142,11 +721,8 @@ class TimerManager {
 
     if (JSON.parse(isAutoChangeIP) && defaultTime) {
       const resetTime = parseInt(defaultTime);
-
       this.clearTimeChangeCountdown();
-
       await this.sleep(200);
-
       this.startTimeChangeCountdownWithTime(resetTime);
       return true;
     }
@@ -1189,10 +765,7 @@ class TimerManager {
 
       if (this.countDowntime < 0) {
         element.innerText = "0 s";
-
         StorageManager.markNextChangeTimerExpired();
-        StorageManager.updateCachedProxyInfoTimerExpired();
-
         this.clearCountDown();
         return;
       }
@@ -1200,42 +773,6 @@ class TimerManager {
       const remainingTime = Date.now() + this.countDowntime * 1000;
       StorageManager.setNextChangeTimer(remainingTime, this.countDowntime);
     }, 1000);
-  }
-
-  restoreCountDown() {
-    const timerData = StorageManager.getNextChangeTimer();
-
-    if (!timerData) {
-      return false;
-    }
-
-    if (timerData.wasExpired || timerData.isExpired) {
-      StorageManager.clearNextChangeTimer();
-
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
-      );
-      if (element) {
-        element.innerText = "0 s";
-      }
-      return false;
-    }
-
-    if (timerData.remainingSeconds <= 0) {
-      StorageManager.markNextChangeTimerExpired();
-      StorageManager.updateCachedProxyInfoTimerExpired();
-
-      const element = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
-      );
-      if (element) {
-        element.innerText = "0 s";
-      }
-      return false;
-    }
-
-    this.startCountDown(timerData.remainingSeconds);
-    return true;
   }
 
   clearCountDown() {
@@ -1248,80 +785,10 @@ class TimerManager {
   setCountDowntime(time) {
     this.countDowntime = parseInt(time) || 0;
   }
-
-  async notifyPopupClosing() {
-    try {
-      await browserAPI.runtime.sendMessage({
-        greeting: "popupClosed",
-        data: { timestamp: Date.now() },
-      });
-    } catch (error) {}
-  }
 }
 
+// Location Manager
 class LocationManager {
-  static async getProxyInfoIfConnectedSafeNoAPI(preserveTimer = false) {
-    const proxyConnected = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
-    );
-
-    if (proxyConnected === "true") {
-      const cachedProxyInfo = StorageManager.getCachedProxyInfo();
-
-      if (cachedProxyInfo) {
-        if (cachedProxyInfo.expired) {
-          const statusElement = document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-          );
-          if (statusElement) {
-            statusElement.innerText = cachedProxyInfo.error;
-            statusElement.classList.remove(
-              POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
-            );
-            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-          }
-          return;
-        }
-
-        UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
-        ProxyManager.updateProxyUIStatus();
-
-        if (cachedProxyInfo.location) {
-          const locationSelect = document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
-          );
-          if (locationSelect) {
-            locationSelect.value = cachedProxyInfo.location;
-          }
-        }
-
-        await this.restoreNextChangeIPFromBackground();
-        return;
-      } else {
-        UIManager.showLoadingProxyInfo();
-
-        const restored = await this.restoreNextChangeIPFromBackground();
-
-        if (!restored) {
-          const statusElement = document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-          );
-          if (statusElement) {
-            statusElement.innerText = "• Đã kết nối (đang tải thông tin)";
-            statusElement.classList.remove(
-              POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER
-            );
-            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
-          }
-        }
-        return;
-      }
-    } else {
-      UIManager.setNotConnectedStatus();
-      StorageManager.clearCachedProxyInfo();
-    }
-  }
-
   static async loadLocations() {
     const cachedLocations = StorageManager.getCachedLocations();
 
@@ -1368,248 +835,6 @@ class LocationManager {
     }
   }
 
-  static async getProxyInfoIfConnectedSafe(preserveTimer = false) {
-    try {
-      const status = await MessageHandler.sendToBackground(
-        "getBackgroundTimerStatus"
-      );
-
-      if (status && (status.isChangingIP || status.isProtected)) {
-        const cachedProxyInfo = StorageManager.getCachedProxyInfo();
-        if (cachedProxyInfo && !cachedProxyInfo.expired) {
-          UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
-          await this.restoreNextChangeIPFromBackground();
-        }
-        return;
-      }
-
-      await this.getProxyInfoIfConnected(preserveTimer);
-    } catch (error) {
-      const cachedProxyInfo = StorageManager.getCachedProxyInfo();
-      if (cachedProxyInfo && !cachedProxyInfo.expired) {
-        UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
-        await this.restoreNextChangeIPFromBackground();
-      }
-    }
-  }
-
-  static async getProxyInfoIfConnected(preserveTimer = false) {
-    const proxyConnected = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
-    );
-
-    if (proxyConnected === "true") {
-      const cachedProxyInfo = StorageManager.getCachedProxyInfo();
-
-      if (cachedProxyInfo) {
-        if (cachedProxyInfo.expired) {
-          const statusElement = document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-          );
-          if (statusElement) {
-            statusElement.innerText = cachedProxyInfo.error;
-            statusElement.classList.remove(
-              POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
-            );
-            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-          }
-
-          return;
-        }
-
-        UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
-        ProxyManager.updateProxyUIStatus();
-
-        if (cachedProxyInfo.location) {
-          const locationSelect = document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
-          );
-          if (locationSelect) {
-            locationSelect.value = cachedProxyInfo.location;
-          }
-        }
-
-        await this.restoreNextChangeIPFromBackground();
-        return;
-      } else {
-        const apiKey = StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.API_KEY);
-        const proxyType =
-          StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.PROXY_TYPE) || "ipv4";
-
-        if (apiKey) {
-          UIManager.showLoadingProxyInfo();
-          try {
-            const apiResponse = await Promise.race([
-              MessageHandler.sendToBackgroundSafe(
-                POPUP_CONFIG.BACKGROUND_MESSAGES.GET_CURRENT_PROXY,
-                {
-                  apiKey: apiKey,
-                  proxyType: proxyType,
-                  preserveTimer: preserveTimer,
-                  onlyGetInfo: true,
-                }
-              ),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error("API timeout")), 1000)
-              ),
-            ]);
-
-            if (!apiResponse) {
-              const statusElement = document.getElementById(
-                POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-              );
-              if (statusElement) {
-                statusElement.innerText = "• Đã kết nối (API không phản hồi)";
-                statusElement.classList.remove(
-                  POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER
-                );
-                statusElement.classList.add(
-                  POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
-                );
-              }
-
-              await this.restoreNextChangeIPFromBackground();
-            }
-          } catch (error) {
-            const statusElement = document.getElementById(
-              POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-            );
-            if (statusElement) {
-              statusElement.innerText = "• Đã kết nối (lỗi tải thông tin)";
-              statusElement.classList.remove(
-                POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER
-              );
-              statusElement.classList.add(
-                POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
-              );
-            }
-
-            await this.restoreNextChangeIPFromBackground();
-          }
-        } else {
-          UIManager.setNotConnectedStatus();
-          StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
-          StorageManager.clearCachedProxyInfo();
-        }
-      }
-    } else {
-      UIManager.setNotConnectedStatus();
-      StorageManager.clearCachedProxyInfo();
-    }
-  }
-
-  static async restoreNextChangeIPFromBackground() {
-    try {
-      const result = await browserAPI.storage.local.get([
-        "nextChangeTarget",
-        "nextChangeDuration",
-        "nextChangeStartTime",
-        "nextChangeExpired",
-      ]);
-
-      if (result.nextChangeTarget && !result.nextChangeExpired) {
-        const now = Date.now();
-        const remainingMs = result.nextChangeTarget - now;
-        const remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
-
-        if (remainingSeconds > 0) {
-          timerManager.setCountDowntime(remainingSeconds + 1);
-          timerManager.startCountDown();
-          return true;
-        } else {
-          await browserAPI.storage.local.set({ nextChangeExpired: true });
-          document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
-          ).innerText = "0 s";
-        }
-      }
-    } catch (error) {}
-    return false;
-  }
-
-  static async forceDisconnectProxy(reason = "Unknown") {
-    try {
-      timerManager.forceStopAll();
-
-      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
-      StorageManager.clearCachedProxyInfo();
-      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
-      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
-      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
-
-      try {
-        await browserAPI.storage.local.remove([
-          POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED,
-          "proxyInfo",
-          "proxyConnectedTimestamp",
-          "lastProxyUpdate",
-        ]);
-      } catch (storageError) {}
-
-      UIManager.setNotConnectedStatus();
-      const ipInfoElement = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.IP_INFO
-      );
-      if (ipInfoElement) {
-        ipInfoElement.style.display = "none";
-      }
-
-      const autoChangeCheckbox = document.getElementById(
-        POPUP_CONFIG.UI_ELEMENTS.IS_AUTO_CHANGE
-      );
-      if (autoChangeCheckbox) {
-        autoChangeCheckbox.checked = false;
-      }
-
-      const config = {
-        reason: reason,
-        timestamp: Date.now(),
-        browser: IS_FIREFOX ? "firefox" : "chrome",
-      };
-
-      if (IS_FIREFOX) {
-        MessageHandler.sendToBackground(
-          POPUP_CONFIG.BACKGROUND_MESSAGES.FORCE_DISCONNECT,
-          config
-        );
-
-        setTimeout(() => {
-          MessageHandler.sendToBackground(
-            POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
-            config
-          );
-        }, 200);
-      } else {
-        MessageHandler.sendToBackground(
-          POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
-          config
-        );
-      }
-
-      try {
-        await ChromeStorageManager.set(
-          POPUP_CONFIG.STORAGE_KEYS.TX_PROXY,
-          null
-        );
-        await ChromeStorageManager.set(
-          POPUP_CONFIG.STORAGE_KEYS.TX_CONF,
-          config
-        );
-      } catch (storageError) {}
-    } catch (error) {
-      UIManager.setNotConnectedStatus();
-      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
-      StorageManager.clearCachedProxyInfo();
-
-      try {
-        await browserAPI.storage.local.remove([
-          POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED,
-        ]);
-      } catch (e) {}
-    }
-  }
-
-  // NEW: Check expiration method
   static async checkAndHandleExpiration() {
     const proxyConnected = StorageManager.get(
       POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
@@ -1651,8 +876,126 @@ class LocationManager {
 
     return false;
   }
+
+  static async forceDisconnectProxy(reason = "Unknown") {
+    try {
+      timerManager.clearAll();
+
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      StorageManager.clearCachedProxyInfo();
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
+
+      UIManager.setNotConnectedStatus();
+      const ipInfoElement = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.IP_INFO
+      );
+      if (ipInfoElement) {
+        ipInfoElement.style.display = "none";
+      }
+
+      const autoChangeCheckbox = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.IS_AUTO_CHANGE
+      );
+      if (autoChangeCheckbox) {
+        autoChangeCheckbox.checked = false;
+      }
+
+      // Set badge to Off when force disconnected
+      await BadgeManager.setBadgeOff();
+
+      const config = {
+        reason: reason,
+        timestamp: Date.now(),
+        browser: IS_FIREFOX ? "firefox" : "chrome",
+      };
+
+      if (IS_FIREFOX) {
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.FORCE_DISCONNECT,
+          config
+        );
+        setTimeout(() => {
+          MessageHandler.sendToBackground(
+            POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+            config
+          );
+        }, 200);
+      } else {
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+          config
+        );
+      }
+
+      await ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_PROXY, null);
+      await ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_CONF, config);
+    } catch (error) {
+      UIManager.setNotConnectedStatus();
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      StorageManager.clearCachedProxyInfo();
+
+      // Set badge to Off even if error
+      await BadgeManager.setBadgeOff();
+    }
+  }
+
+  static async getProxyInfoIfConnectedSafeNoAPI(preserveTimer = false) {
+    const proxyConnected = StorageManager.get(
+      POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
+    );
+
+    if (proxyConnected === "true") {
+      const cachedProxyInfo = StorageManager.getCachedProxyInfo();
+
+      if (cachedProxyInfo) {
+        if (cachedProxyInfo.expired) {
+          const statusElement = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+          );
+          if (statusElement) {
+            statusElement.innerText = cachedProxyInfo.error;
+            statusElement.classList.remove(
+              POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
+            );
+            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+          }
+          return;
+        }
+
+        UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
+        ProxyManager.updateProxyUIStatus();
+
+        if (cachedProxyInfo.location) {
+          const locationSelect = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.LOCATION_SELECT
+          );
+          if (locationSelect) {
+            locationSelect.value = cachedProxyInfo.location;
+          }
+        }
+        return;
+      } else {
+        UIManager.showLoadingProxyInfo();
+        const statusElement = document.getElementById(
+          POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
+        );
+        if (statusElement) {
+          statusElement.innerText = "• Đã kết nối (đang tải thông tin)";
+          statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+          statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
+        }
+        return;
+      }
+    } else {
+      UIManager.setNotConnectedStatus();
+      StorageManager.clearCachedProxyInfo();
+    }
+  }
 }
 
+// UI Manager
 class UIManager {
   static showProcessingNewIpConnectProtected() {
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.IP_INFO).style.display =
@@ -1725,12 +1068,8 @@ class UIManager {
     statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
     statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
 
-    const restored = timerManager.restoreCountDown();
-
-    if (!restored) {
-      document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
-        "0 s";
-    }
+    document.getElementById(POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME).innerText =
+      "0 s";
   }
 
   static showError(messageData) {
@@ -1749,7 +1088,7 @@ class UIManager {
     this.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT);
     this.enableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
 
-    timerManager.forceStopAll();
+    timerManager.clearAll();
 
     document.getElementById(POPUP_CONFIG.UI_ELEMENTS.PUBLIC_IPV4).innerText =
       "";
@@ -1803,6 +1142,7 @@ class UIManager {
   }
 }
 
+// Form Manager
 class FormManager {
   static getProxyType() {
     const proxyTypeElements = document.querySelectorAll(
@@ -1934,6 +1274,7 @@ class FormManager {
   }
 }
 
+// Change IP Manager
 class ChangeIPManager {
   static init() {
     const changeIpElements = document.querySelectorAll(
@@ -1957,18 +1298,15 @@ class ChangeIPManager {
     const timeChangeInput = document.getElementById(
       POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
     );
-
     const containerChangeIP = document.querySelector(".container-change-ip");
 
     if (changeIpType === POPUP_CONFIG.CHANGE_IP_TYPES.KEEP) {
       if (autoChangeCheckbox) {
         if (autoChangeCheckbox.checked) {
           autoChangeCheckbox.checked = false;
-
           const changeEvent = new Event("change", { bubbles: true });
           autoChangeCheckbox.dispatchEvent(changeEvent);
         }
-
         autoChangeCheckbox.disabled = true;
       }
 
@@ -1981,7 +1319,7 @@ class ChangeIPManager {
         containerChangeIP.classList.add("disabled");
       }
 
-      timerManager.forceStopAll();
+      timerManager.clearAll();
 
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
       StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
@@ -1995,7 +1333,6 @@ class ChangeIPManager {
 
       if (timeChangeInput) {
         timeChangeInput.disabled = false;
-
         const savedTime = StorageManager.get(
           POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
         );
@@ -2018,6 +1355,71 @@ class ChangeIPManager {
   }
 }
 
+class BadgeManager {
+  static badgeTimeout = null;
+
+  static async setBadgeOn() {
+    try {
+      // Clear any pending badge changes
+      if (this.badgeTimeout) {
+        clearTimeout(this.badgeTimeout);
+        this.badgeTimeout = null;
+      }
+
+      await browserAPI.action.setBadgeText({ text: "On" });
+      await browserAPI.action.setBadgeBackgroundColor({ color: "#00ff00" });
+
+      // Notify background to not change badge
+      await browserAPI.storage.local.set({
+        badgeState: "on",
+        badgeControlledBy: "popup",
+        badgeTimestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error("Error setting badge On:", error);
+    }
+  }
+
+  static async setBadgeOff() {
+    try {
+      // Clear any pending badge changes
+      if (this.badgeTimeout) {
+        clearTimeout(this.badgeTimeout);
+        this.badgeTimeout = null;
+      }
+
+      await browserAPI.action.setBadgeText({ text: "Off" });
+      await browserAPI.action.setBadgeBackgroundColor({ color: "#ff0000" });
+
+      // Notify background to not change badge
+      await browserAPI.storage.local.set({
+        badgeState: "off",
+        badgeControlledBy: "popup",
+        badgeTimestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error("Error setting badge Off:", error);
+    }
+  }
+
+  static async lockBadgeState(duration = 10000) {
+    // Lock badge state for a duration to prevent background from changing it
+    await browserAPI.storage.local.set({
+      badgeLocked: true,
+      badgeLockExpiry: Date.now() + duration,
+    });
+
+    // Auto unlock after duration
+    this.badgeTimeout = setTimeout(async () => {
+      await browserAPI.storage.local.set({
+        badgeLocked: false,
+        badgeLockExpiry: 0,
+      });
+    }, duration);
+  }
+}
+
+// Proxy Manager
 class ProxyManager {
   static async handleClick() {
     const formData = FormManager.getFormData();
@@ -2049,6 +1451,7 @@ class ProxyManager {
       config.location = formData.location;
     }
 
+    // Don't set badge here - wait for actual connection confirmation
     if (ChangeIPManager.isChangeIPAllowed()) {
       if (formData.isAutoChangeIP) {
         await MessageHandler.sendToBackground(
@@ -2078,23 +1481,15 @@ class ProxyManager {
 
   static async handleSuccessfulConnection(proxyData, preserveTimer = false) {
     if (!preserveTimer) {
-      timerManager.forceStopAll();
-    } else {
-      timerManager.clearNextTimeChangeOnly();
+      timerManager.clearAll();
     }
 
     const currentTime = Math.floor(Date.now() / 1000);
 
-    // FIXED: Sử dụng TimeUtils để convert thời gian
+    // Check expiration
     if (proxyData.expired) {
       const expiredTimestamp = TimeUtils.convertToTimestamp(proxyData.expired);
       if (expiredTimestamp > 0 && currentTime >= expiredTimestamp) {
-        console.log("ProxyManager: Key expired in handleSuccessfulConnection", {
-          current: currentTime,
-          expired: expiredTimestamp,
-          expiredValue: proxyData.expired,
-        });
-
         UIManager.showError({
           data: {
             error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED.replace("• ", ""),
@@ -2112,15 +1507,6 @@ class ProxyManager {
         proxyData.proxyTimeout
       );
       if (timeoutTimestamp > 0 && currentTime >= timeoutTimestamp) {
-        console.log(
-          "ProxyManager: Proxy timeout in handleSuccessfulConnection",
-          {
-            current: currentTime,
-            timeout: timeoutTimestamp,
-            timeoutValue: proxyData.proxyTimeout,
-          }
-        );
-
         UIManager.showError({
           data: {
             error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED.replace("• ", ""),
@@ -2133,23 +1519,14 @@ class ProxyManager {
       }
     }
 
-    // Tiếp tục với logic cũ...
     setTimeout(async () => {
-      const cacheUpdateSuccess = this.updateProxyCache(
-        proxyData,
-        proxyData.cacheSource || "ChangeIP/Connect API"
-      );
-
+      StorageManager.setCachedProxyInfo(proxyData);
       UIManager.showProxyInfo(proxyData, false, preserveTimer);
       await this.updateProxyUIStatus();
 
-      if (proxyData.updateCache || proxyData.cacheSource) {
-        StorageManager.setCachedProxyInfo(proxyData);
-
-        try {
-          await browserAPI.storage.sync.set({ tx_proxy: proxyData });
-        } catch (error) {}
-      }
+      // Set badge to On and lock it for 10 seconds
+      await BadgeManager.setBadgeOn();
+      await BadgeManager.lockBadgeState(10000);
 
       if (!preserveTimer) {
         const isAutoChangeIP = StorageManager.get(
@@ -2170,10 +1547,6 @@ class ProxyManager {
             defaultTime
           );
           timerManager.startTimeChangeCountdownWithTime(defaultTime);
-
-          setTimeout(async () => {
-            await this.syncNextChangeIPWithBackground();
-          }, 1000);
         } else {
           if (proxyData.nextChangeIP && proxyData.nextChangeIP > 0) {
             timerManager.setCountDowntime(proxyData.nextChangeIP);
@@ -2184,81 +1557,16 @@ class ProxyManager {
     }, 100);
   }
 
-  static async syncNextChangeIPWithBackground() {
-    try {
-      const backgroundStatus = await MessageHandler.sendToBackground(
-        "getBackgroundTimerStatus"
-      );
-
-      if (backgroundStatus && backgroundStatus.isActive) {
-        const result = await browserAPI.storage.local.get([
-          "nextChangeTarget",
-          "nextChangeDuration",
-          "nextChangeExpired",
-        ]);
-
-        if (result.nextChangeTarget && !result.nextChangeExpired) {
-          const now = Date.now();
-          const remainingMs = result.nextChangeTarget - now;
-          const remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
-
-          if (remainingSeconds > 0) {
-            timerManager.setCountDowntime(remainingSeconds + 2);
-            timerManager.startCountDown();
-          }
-        }
-      }
-    } catch (error) {}
-  }
-
   static handleInfoKeySuccess(data) {
     this.handleClick();
   }
 
   static async updateProxyUIStatus() {
     StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED, "true");
-
-    try {
-      await browserAPI.storage.local.set({
-        [POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED]: "true",
-        proxyConnectedTimestamp: Date.now(),
-      });
-    } catch (error) {}
-  }
-
-  static async updateProxyCache(proxyData, source = "API") {
-    try {
-      if (
-        source.includes("API") ||
-        source.includes("ChangeIP") ||
-        source.includes("changeIP")
-      ) {
-        const wasExpired = StorageManager.wasNextChangeTimerExpired();
-        if (wasExpired) {
-          StorageManager.clearNextChangeTimer();
-        }
-      }
-
-      StorageManager.setCachedProxyInfo(proxyData);
-      await ChromeStorageManager.set(
-        POPUP_CONFIG.STORAGE_KEYS.TX_PROXY,
-        proxyData
-      );
-      StorageManager.set(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO, proxyData);
-
-      await browserAPI.storage.local.set({
-        proxyInfo: proxyData,
-        lastProxyUpdate: Date.now(),
-      });
-
-      return true;
-    } catch (error) {
-      return false;
-    }
   }
 
   static async directProxy(reason) {
-    timerManager.forceStopAll();
+    timerManager.clearAll();
 
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
@@ -2268,22 +1576,9 @@ class ProxyManager {
       POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
     );
 
-    console.log(`Disconnecting proxy due to: ${reason}`);
-
     if (reason !== "key expired" && reason !== "proxy timeout") {
       StorageManager.clearCachedProxyInfo();
     }
-
-    timerManager.clearNextTimeChangeState();
-
-    try {
-      await browserAPI.storage.local.remove([
-        POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED,
-        "proxyInfo",
-        "proxyConnectedTimestamp",
-        "lastProxyUpdate",
-      ]);
-    } catch (error) {}
 
     const autoChangeCheckbox = document.getElementById(
       POPUP_CONFIG.UI_ELEMENTS.IS_AUTO_CHANGE
@@ -2291,6 +1586,9 @@ class ProxyManager {
     if (autoChangeCheckbox) {
       autoChangeCheckbox.checked = false;
     }
+
+    // Set badge to Off when disconnected
+    await BadgeManager.setBadgeOff();
   }
 
   static async disconnect() {
@@ -2311,16 +1609,14 @@ class ProxyManager {
       await ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_CONF, config);
 
       UIManager.clearPopupPage();
-      await this.directProxy();
+      await this.directProxy("manual disconnect");
 
       if (IS_FIREFOX) {
         MessageHandler.sendToBackground(
           POPUP_CONFIG.BACKGROUND_MESSAGES.FORCE_DISCONNECT,
           config
         );
-
         await new Promise((resolve) => setTimeout(resolve, 200));
-
         MessageHandler.sendToBackground(
           POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
           config
@@ -2331,47 +1627,14 @@ class ProxyManager {
           config
         );
       }
-
-      if (IS_FIREFOX) {
-        try {
-          await browserAPI.storage.local.remove(["firefoxProxyActive"]);
-        } catch (e) {}
-
-        await new Promise((resolve) => setTimeout(resolve, 300));
-      }
     } catch (error) {
       UIManager.clearPopupPage();
-      await this.directProxy();
+      await this.directProxy("disconnect error");
     }
-  }
-
-  static async forceCacheRefresh() {
-    try {
-      const result = await browserAPI.storage.sync.get([
-        "tx_proxy",
-        "cacheUpdateFlag",
-      ]);
-
-      if (result.tx_proxy) {
-        StorageManager.setCachedProxyInfo(result.tx_proxy);
-
-        const proxyConnected = StorageManager.get(
-          POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
-        );
-
-        if (proxyConnected === "true") {
-          UIManager.showProxyInfo(result.tx_proxy, false, true);
-          await ProxyManager.updateProxyUIStatus();
-        }
-
-        return true;
-      }
-    } catch (error) {}
-
-    return false;
   }
 }
 
+// Event Manager
 class EventManager {
   static setupEventListeners() {
     document
@@ -2379,7 +1642,7 @@ class EventManager {
       .addEventListener("click", async () => {
         UIManager.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
         UIManager.clearPopupPage();
-        timerManager.forceStopAll();
+        timerManager.clearAll();
         await ProxyManager.handleClick();
       });
 
@@ -2400,25 +1663,28 @@ class EventManager {
   }
 }
 
+// App Initializer - FIXED to prevent infinite loops
 class AppInitializer {
+  static isInitializing = false;
+  static initAttempts = 0;
+  static maxInitAttempts = 3;
+
   static async initialize() {
     try {
-      if (this.isInitializing) {
+      if (this.isInitializing || this.initAttempts >= this.maxInitAttempts) {
         return;
       }
 
       this.isInitializing = true;
+      this.initAttempts++;
 
-      timerManager.forceStopAll();
+      timerManager.clearAll();
       UIManager.setNotConnectedStatus();
 
-      // NEW: Check expiration first when connected
       const expiredHandled = await LocationManager.checkAndHandleExpiration();
       if (expiredHandled) {
         return;
       }
-
-      const cacheUpdated = await this.checkAndApplyPendingCacheUpdates();
 
       const backgroundStatus = await this.checkBackgroundStatus();
 
@@ -2553,126 +1819,21 @@ class AppInitializer {
       const proxyConnected = StorageManager.get(
         POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
       );
-      const isAutoChangeIP = StorageManager.get(
-        POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-      );
-
-      let timerInitialized = false;
-
-      if (
-        proxyConnected === "true" &&
-        JSON.parse(isAutoChangeIP) &&
-        ChangeIPManager.isChangeIPAllowed()
-      ) {
-        if (backgroundData && backgroundData.isActive) {
-          const now = Date.now();
-          const timeSinceLastUpdate = Math.floor(
-            (now - backgroundData.lastUpdateTime) / 1000
-          );
-          const realRemainingTime = Math.max(
-            0,
-            backgroundData.remainingTime - timeSinceLastUpdate
-          );
-
-          if (realRemainingTime > 0) {
-            timerInitialized =
-              timerManager.startTimeChangeCountdownWithTime(realRemainingTime);
-          } else {
-            timerInitialized = await timerManager.initializeTimer();
-          }
-        } else {
-          timerInitialized = await timerManager.initializeTimer();
-        }
-
-        if (timerInitialized) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-      }
 
       if (proxyConnected === "true") {
-        // NEW: Check expiration again before loading proxy info
+        // Update badge to On if connected
+        await BadgeManager.setBadgeOn();
+
         const expiredHandled = await LocationManager.checkAndHandleExpiration();
         if (!expiredHandled) {
-          await LocationManager.getProxyInfoIfConnectedSafeNoAPI(
-            timerInitialized
-          );
+          await LocationManager.getProxyInfoIfConnectedSafeNoAPI(false);
         }
+      } else {
+        // Update badge to Off if not connected
+        await BadgeManager.setBadgeOff();
       }
     } catch (error) {
       this.showInitializationError();
-    }
-  }
-
-  static async checkAndApplyPendingCacheUpdates() {
-    try {
-      const result = await browserAPI.storage.sync.get([
-        "cacheUpdateFlag",
-        "tx_proxy",
-      ]);
-
-      if (
-        result.cacheUpdateFlag &&
-        result.cacheUpdateFlag.needsLocalStorageUpdate
-      ) {
-        const updateAge = Date.now() - result.cacheUpdateFlag.timestamp;
-
-        if (updateAge < 300000) {
-          StorageManager.setCachedProxyInfo(result.cacheUpdateFlag.proxyInfo);
-
-          await browserAPI.storage.sync.set({
-            cacheUpdateFlag: {
-              ...result.cacheUpdateFlag,
-              needsLocalStorageUpdate: false,
-              appliedAt: Date.now(),
-              appliedBy: "popup_initialization",
-            },
-          });
-
-          return true;
-        }
-      }
-
-      const fallbackResult = await this.checkFallbackCacheSources(result);
-      return fallbackResult;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  static async checkFallbackCacheSources(syncResult) {
-    try {
-      const localResult = await browserAPI.storage.local.get([
-        "cachedProxyInfo",
-      ]);
-
-      if (
-        localResult.cachedProxyInfo &&
-        localResult.cachedProxyInfo.proxyInfo
-      ) {
-        const localCache = StorageManager.getCachedProxyInfo();
-        const localTimestamp = localResult.cachedProxyInfo.timestamp || 0;
-        const currentTimestamp =
-          localCache && localCache.timestamp ? localCache.timestamp : 0;
-
-        if (localTimestamp > currentTimestamp) {
-          StorageManager.setCachedProxyInfo(
-            localResult.cachedProxyInfo.proxyInfo
-          );
-          return true;
-        }
-      }
-
-      if (syncResult.tx_proxy) {
-        const currentCache = StorageManager.getCachedProxyInfo();
-        if (!currentCache) {
-          StorageManager.setCachedProxyInfo(syncResult.tx_proxy);
-          return true;
-        }
-      }
-
-      return false;
-    } catch (error) {
-      return false;
     }
   }
 
@@ -2702,42 +1863,15 @@ class AppInitializer {
   }
 }
 
+// Initialize
 const timerManager = new TimerManager();
 
 window.addEventListener("beforeunload", async () => {
   timerManager.stopSyncCheck();
-  await timerManager.notifyPopupClosing();
-  timerManager.markPopupInactive();
 });
 
 window.addEventListener("unload", async () => {
   timerManager.stopSyncCheck();
-  await timerManager.notifyPopupClosing();
-  timerManager.markPopupInactive();
-});
-
-document.addEventListener("visibilitychange", async () => {
-  if (document.hidden) {
-    timerManager.stopSyncCheck();
-    await timerManager.notifyPopupClosing();
-  } else {
-    const isAutoChangeIP = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-    );
-    const proxyConnected = StorageManager.get(
-      POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
-    );
-
-    if (
-      JSON.parse(isAutoChangeIP) &&
-      proxyConnected === "true" &&
-      ChangeIPManager.isChangeIPAllowed()
-    ) {
-      setTimeout(async () => {
-        await timerManager.initializeTimer();
-      }, 500);
-    }
-  }
 });
 
 MessageHandler.setupMessageListener();

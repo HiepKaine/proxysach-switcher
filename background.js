@@ -99,6 +99,113 @@ class AuthenticationManager {
   }
 }
 
+class BadgeStateManager {
+  constructor() {
+    this.currentState = "OFF";
+    this.lastUpdate = 0;
+  }
+
+  async init() {
+    try {
+      const result = await browserAPI.storage.local.get([
+        "badgeState",
+        "proxyConnected",
+      ]);
+      if (result.proxyConnected === "true") {
+        this.setOn();
+      } else {
+        this.setOff();
+      }
+    } catch (error) {
+      this.setOff();
+    }
+  }
+
+  setOn() {
+    this.currentState = "ON";
+    this.lastUpdate = Date.now();
+
+    try {
+      browserAPI.action.setBadgeBackgroundColor({ color: [36, 162, 36, 255] });
+      browserAPI.action.setBadgeText({ text: "ON" });
+      browserAPI.storage.local.set({ badgeState: "ON" });
+    } catch (error) {}
+  }
+
+  setOff() {
+    this.currentState = "OFF";
+    this.lastUpdate = Date.now();
+
+    try {
+      browserAPI.action.setBadgeBackgroundColor({ color: [162, 36, 36, 255] });
+      browserAPI.action.setBadgeText({ text: "OFF" });
+      browserAPI.storage.local.set({ badgeState: "OFF" });
+    } catch (error) {}
+  }
+
+  async syncWithProxyState() {
+    try {
+      const result = await browserAPI.storage.local.get(["proxyConnected"]);
+      const proxyInfo = await browserAPI.storage.sync.get([
+        CONFIG.STORAGE_KEYS.TX_PROXY,
+      ]);
+
+      if (
+        result.proxyConnected === "true" &&
+        proxyInfo[CONFIG.STORAGE_KEYS.TX_PROXY]
+      ) {
+        const proxy = proxyInfo[CONFIG.STORAGE_KEYS.TX_PROXY];
+        const currentTime = Math.floor(Date.now() / 1000);
+
+        if (proxy.expired) {
+          const expiredTime = this.parseTime(proxy.expired);
+          if (expiredTime && currentTime >= expiredTime) {
+            this.setOff();
+            return;
+          }
+        }
+
+        // Check proxy timeout
+        if (proxy.proxyTimeout) {
+          const timeoutTime = this.parseTime(proxy.proxyTimeout);
+          if (timeoutTime && currentTime >= timeoutTime) {
+            this.setOff();
+            return;
+          }
+        }
+
+        this.setOn();
+      } else {
+        this.setOff();
+      }
+    } catch (error) {
+      console.error("Error syncing badge state:", error);
+    }
+  }
+
+  parseTime(timeValue) {
+    if (typeof timeValue === "string") {
+      const parts = timeValue.trim().split(" ");
+      if (parts.length === 2) {
+        const [time, date] = parts;
+        const [hours, minutes, seconds] = time
+          .split(":")
+          .map((n) => parseInt(n));
+        const [day, month, year] = date.split("/").map((n) => parseInt(n));
+        const dateObj = new Date(year, month - 1, day, hours, minutes, seconds);
+        return Math.floor(dateObj.getTime() / 1000);
+      }
+    } else if (typeof timeValue === "number") {
+      return timeValue > 1000000000000
+        ? Math.floor(timeValue / 1000)
+        : timeValue;
+    }
+    return 0;
+  }
+}
+
+const badgeStateManager = new BadgeStateManager();
+
 class ProxyRequestManager {
   constructor() {
     this.mode = "";
@@ -427,12 +534,8 @@ class BrowserProxyManager {
     try {
       if (IS_FIREFOX) {
         // Firefox proxy is handled entirely by ProxyRequestManager.process()
-        console.log(
-          "BrowserProxyManager: Firefox proxy setup via ProxyRequestManager"
-        );
       } else {
         await this.setChromeProxy(config);
-        console.log("BrowserProxyManager: Chrome proxy set successfully");
       }
     } catch (error) {
       console.error("BrowserProxyManager: Error setting browser proxy:", error);
@@ -442,19 +545,14 @@ class BrowserProxyManager {
 
   static async clearBrowserProxy() {
     try {
-      console.log("BrowserProxyManager: Starting clearBrowserProxy...");
-
       if (IS_FIREFOX) {
         // Firefox proxy clearing is handled by ProxyRequestManager
-        console.log(
-          "BrowserProxyManager: Firefox proxy clearing via ProxyRequestManager"
-        );
+
         return true;
       } else {
         // For Chrome, clear proxy settings
         const success = await this.clearChromeProxy();
         if (success) {
-          console.log("BrowserProxyManager: Chrome proxy cleared successfully");
         } else {
           console.warn(
             "BrowserProxyManager: Chrome proxy clear may have failed"
@@ -473,8 +571,6 @@ class BrowserProxyManager {
 
   static async clearChromeProxy() {
     try {
-      console.log("BrowserProxyManager: Clearing Chrome proxy settings...");
-
       if (!browserAPI.proxy?.settings) {
         console.warn(
           "BrowserProxyManager: browserAPI.proxy.settings not available"
@@ -489,20 +585,12 @@ class BrowserProxyManager {
       while (attempts < maxAttempts) {
         try {
           await browserAPI.proxy.settings.clear({ scope: "regular" });
-          console.log(
-            `BrowserProxyManager: Chrome proxy cleared on attempt ${
-              attempts + 1
-            }`
-          );
 
           // Verify it was cleared
           const settings = await browserAPI.proxy.settings.get({
             incognito: false,
           });
           if (settings.value.mode === "direct" || !settings.value.mode) {
-            console.log(
-              "BrowserProxyManager: Chrome proxy verified as cleared"
-            );
             return true;
           } else {
             console.warn(
@@ -529,9 +617,7 @@ class BrowserProxyManager {
                 value: { mode: "direct" },
                 scope: "regular",
               });
-              console.log(
-                "BrowserProxyManager: Chrome proxy set to direct mode as fallback"
-              );
+
               return true;
             } catch (fallbackError) {
               console.error(
@@ -553,8 +639,6 @@ class BrowserProxyManager {
 
   static async setChromeProxy(preferences) {
     try {
-      console.log("BrowserProxyManager: Setting Chrome proxy...");
-
       if (!browserAPI.proxy?.settings) {
         throw new Error("browserAPI.proxy.settings not available");
       }
@@ -567,16 +651,11 @@ class BrowserProxyManager {
         config.value.rules = this.getSingleProxyRule(proxy);
 
         await browserAPI.proxy.settings.set(config);
-        console.log("BrowserProxyManager: Chrome proxy set successfully");
 
         // Verify it was set
         const settings = await browserAPI.proxy.settings.get({
           incognito: false,
         });
-        console.log(
-          "BrowserProxyManager: Chrome proxy verification:",
-          settings.value
-        );
       } else {
         throw new Error("No active proxy found in preferences");
       }
@@ -609,7 +688,7 @@ class BrowserProxyManager {
   // NEW: Method to verify proxy state
   static async verifyProxyCleared() {
     try {
-      MainProxyManager.setBadgeOff();
+      proxyManager.setBadgeOff();
 
       if (IS_FIREFOX) {
         // For Firefox, check through ProxyRequestManager
@@ -623,13 +702,7 @@ class BrowserProxyManager {
           });
           const isCleared =
             settings.value.mode === "direct" || !settings.value.mode;
-          console.log(
-            "BrowserProxyManager: Chrome proxy verification result:",
-            {
-              mode: settings.value.mode,
-              isCleared: isCleared,
-            }
-          );
+
           return isCleared;
         }
       }
@@ -1252,18 +1325,15 @@ class AutoChangeManager {
 
 class MessageHandler {
   constructor() {
-    // NEW: Add request tracking to prevent duplicates
     this.activeRequests = new Map();
     this.requestTimeout = 5000; // 5 seconds
   }
 
-  // NEW: Generate unique request ID
   generateRequestId(greeting, data) {
     const key = `${greeting}_${data?.apiKey || "no_key"}_${Date.now()}`;
     return key;
   }
 
-  // NEW: Check if request is duplicate
   isDuplicateRequest(greeting, data) {
     const baseKey = `${greeting}_${data?.apiKey || "no_key"}`;
 
@@ -1281,9 +1351,7 @@ class MessageHandler {
     return false;
   }
 
-  // NEW: Enhanced duplicate detection for auto change IP
   isDuplicateAutoChangeRequest(data) {
-    // Check if auto change is already running
     if (autoChangeManager.isRunning) {
       return true;
     }
@@ -1356,6 +1424,27 @@ class MessageHandler {
       switch (request.greeting) {
         case "ping":
           sendResponse({ pong: true });
+          break;
+
+        case "SET_BADGE_ON":
+          badgeLockManager.lock("popup", request.data?.lockDuration || 10000);
+          proxyManager.setBadgeOn();
+          sendResponse({ success: true });
+          break;
+
+        case "SET_BADGE_OFF":
+          badgeLockManager.lock("popup", request.data?.lockDuration || 10000);
+          proxyManager.setBadgeOff();
+          sendResponse({ success: true });
+          break;
+
+        case "BADGE_CONTROL":
+          if (request.data?.takeControl) {
+            badgeLockManager.lock("popup", 30000); // Lock for 30s
+          } else {
+            badgeLockManager.unlock("popup");
+          }
+          sendResponse({ success: true });
           break;
 
         case "getBackgroundTimerStatus":
@@ -1492,17 +1581,14 @@ class MessageHandler {
   }
 
   // NEW: Enhanced force disconnect handler
-  async handleForceDisconnect(data) {
-    // Set badge OFF ngay lập tức
+  async handleForceDisconnect() {
     proxyManager.setBadgeOff();
+    await browserAPI.storage.local.set({ proxyConnected: "false" });
 
-    // Sau đó thực hiện các operations async
     (async () => {
       try {
-        // Stop any running auto change
         await autoChangeManager.stop();
 
-        // Force clear Firefox proxy state multiple times
         if (IS_FIREFOX) {
           for (let i = 0; i < 3; i++) {
             await proxyRequestManager.forceClearFirefoxProxy();
@@ -1527,18 +1613,11 @@ class MessageHandler {
           [CONFIG.STORAGE_KEYS.TX_PROXY]: null,
         });
       } catch (error) {
-        console.error("MessageHandler: Error during force disconnect:", error);
-        // Ensure badge is OFF even on error
         proxyManager.setBadgeOff();
 
         try {
           await proxyManager.setDirectProxy();
-        } catch (e) {
-          console.error(
-            "MessageHandler: Final attempt to disconnect failed:",
-            e
-          );
-        }
+        } catch (e) {}
       }
     })();
   }
@@ -1546,8 +1625,8 @@ class MessageHandler {
   async handleCancelAll(data) {
     // Set badge OFF ngay lập tức
     proxyManager.setBadgeOff();
+    await browserAPI.storage.local.set({ proxyConnected: "false" });
 
-    // Sau đó thực hiện các operations async
     (async () => {
       try {
         this.deleteAlarm("flagLoop");
@@ -1629,7 +1708,6 @@ class MessageHandler {
     }
   }
 
-  // ENHANCED: Better change IP method with duplicate protection
   async changeIP(apiKey, location, proxyType) {
     this.sendToPopup("showProcessingNewIpConnect", {});
 
@@ -1642,30 +1720,11 @@ class MessageHandler {
 
       if (result?.code === 200) {
         await proxyManager.handleProxyResponse(result.data, apiKey, proxyType);
-
-        // Update cached proxy info after successful change IP
-        try {
-          const proxyInfo = await proxyManager.buildProxyInfo(
-            result.data,
-            apiKey,
-            proxyType
-          );
-
-          await browserAPI.storage.sync.set({
-            [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
-            cacheUpdateFlag: {
-              timestamp: Date.now(),
-              source: "changeIP",
-              proxyInfo: proxyInfo,
-            },
-          });
-        } catch (cacheError) {
-          console.error(
-            "MessageHandler: Error updating proxy cache:",
-            cacheError
-          );
-        }
       } else {
+        // API call failed - set badge OFF
+        proxyManager.setBadgeOff();
+        await browserAPI.storage.local.set({ proxyConnected: "false" });
+
         const error =
           result?.code === 500
             ? CONFIG.ERRORS.CONNECTION_FAILED
@@ -1673,6 +1732,10 @@ class MessageHandler {
         this.sendToPopup("failureGetProxyInfo", { error });
       }
     } catch (error) {
+      // Error during changeIP - set badge OFF
+      proxyManager.setBadgeOff();
+      await browserAPI.storage.local.set({ proxyConnected: "false" });
+
       console.error("MessageHandler: Error during changeIP:", error);
       this.sendToPopup("failureGetProxyInfo", {
         error: CONFIG.ERRORS.UNKNOWN_ERROR,
@@ -1680,7 +1743,7 @@ class MessageHandler {
     }
   }
 
-  async disconnectProxy(apiKey, whitelistIp) {
+  async disconnectProxy() {
     try {
       // Stop auto change if running
       if (autoChangeManager.isRunning) {
@@ -1745,48 +1808,32 @@ class MainProxyManager {
 
   async setDirectProxy() {
     try {
-      // Set badge OFF ngay lập tức khi bắt đầu disconnect
       this.setBadgeOff();
-
-      // Only stop auto change if it's not in the middle of changing IP
+      await browserAPI.storage.local.set({ proxyConnected: "false" });
       if (
         autoChangeManager.isRunning &&
         !autoChangeManager.isChangingIPActive
       ) {
         await autoChangeManager.stop();
       } else if (autoChangeManager.isChangingIPActive) {
-        console.log(
-          "MainProxyManager: Auto change is changing IP, skipping stop"
-        );
       }
 
-      // Clear internal proxy settings first
       await this.requestManager.clearProxy();
 
-      // For Firefox, ensure proxy state is cleared multiple times
       if (IS_FIREFOX) {
         for (let i = 0; i < 3; i++) {
           await this.requestManager.forceClearFirefoxProxy();
           await new Promise((resolve) => setTimeout(resolve, 200));
         }
 
-        // Verify it's actually cleared
         const state = await this.requestManager.loadFirefoxProxyState();
         if (state) {
-          console.warn(
-            "Background: Firefox proxy still active after clearing, trying once more"
-          );
           await this.requestManager.forceClearFirefoxProxy();
         }
       }
 
-      // Clear browser proxy settings
       await BrowserProxyManager.clearBrowserProxy();
-
-      // Clear authentication
       this.authManager.clear();
-
-      // Update badge và storage - đảm bảo badge được set OFF
       this.setBadgeOff();
 
       await browserAPI.storage.sync.set({
@@ -1806,18 +1853,7 @@ class MainProxyManager {
 
       return true;
     } catch (error) {
-      console.error("Error setting direct proxy:", error);
-
-      // Even on error, try to at least clear the proxy và set badge OFF
-      try {
-        await BrowserProxyManager.clearBrowserProxy();
-        this.setBadgeOff();
-      } catch (e) {
-        console.error("Failed to clear proxy on error:", e);
-        // Vẫn cố gắng set badge OFF
-        this.setBadgeOff();
-      }
-
+      this.setBadgeOff();
       return false;
     }
   }
@@ -1843,17 +1879,20 @@ class MainProxyManager {
       this.authManager.init(proxyConfig.data);
       await BrowserProxyManager.setBrowserProxy(proxyInfo);
 
-      // FIXED: Force refresh Firefox state after setting proxy
       if (IS_FIREFOX) {
         await this.requestManager.forceRefreshFirefoxState();
       }
 
+      await browserAPI.storage.local.set({ proxyConnected: "true" });
       this.setBadgeOn(proxyInfo.location);
+
       await browserAPI.storage.sync.set({
         [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
       });
     } catch (error) {
-      console.error("Error setting proxy:", error);
+      this.setBadgeOff();
+      await browserAPI.storage.local.set({ proxyConnected: "false" });
+
       messageHandler.sendToPopup("failureGetProxyInfo", {
         error: CONFIG.ERRORS.SETUP_FAILED,
       });
@@ -1862,6 +1901,9 @@ class MainProxyManager {
 
   async handleProxyResponse(response, apiKey, proxyType) {
     if (!response?.ipv4 && !response?.ipv6) {
+      this.setBadgeOff();
+      await browserAPI.storage.local.set({ proxyConnected: "false" });
+
       const error =
         response?.code === 500
           ? CONFIG.ERRORS.CONNECTION_FAILED
@@ -1871,7 +1913,6 @@ class MainProxyManager {
     }
 
     const proxyInfo = await this.buildProxyInfo(response, apiKey, proxyType);
-
     await browserAPI.storage.sync.set({
       [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
       cacheUpdateFlag: {
@@ -1898,11 +1939,12 @@ class MainProxyManager {
         updateCache: true,
         cacheSource: "background_while_closed",
       });
-    } catch (error) {
-      // Popup đã đóng, ignore error
-    }
+    } catch (error) {}
 
     if (!proxyInfo.public_ip || !proxyInfo.port) {
+      this.setBadgeOff();
+      await browserAPI.storage.local.set({ proxyConnected: "false" });
+
       messageHandler.sendToPopup("failureGetProxyInfo", {
         error: CONFIG.ERRORS.INVALID_PROXY,
       });
@@ -1911,7 +1953,6 @@ class MainProxyManager {
 
     await this.setProxySettings(proxyInfo);
 
-    // ENHANCED: Always update storage with latest proxy info
     try {
       await browserAPI.storage.sync.set({
         [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
@@ -1980,22 +2021,12 @@ class MainProxyManager {
     return /([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}/.test(text);
   }
 
-  setBadgeOff() {
-    try {
-      browserAPI.action.setBadgeBackgroundColor({ color: [162, 36, 36, 255] });
-      browserAPI.action.setBadgeText({ text: "OFF" });
-    } catch (error) {
-      console.error("Error setting badge off:", error);
-    }
+  setBadgeOn() {
+    badgeStateManager.setOn();
   }
 
-  setBadgeOn() {
-    try {
-      browserAPI.action.setBadgeBackgroundColor({ color: [36, 162, 36, 255] });
-      browserAPI.action.setBadgeText({ text: "ON" });
-    } catch (error) {
-      console.error("Error setting badge on:", error);
-    }
+  setBadgeOff() {
+    badgeStateManager.setOff();
   }
 
   async disconnectProxyOnly() {
@@ -2057,9 +2088,7 @@ class MainProxyManager {
         }),
         browserAPI.action.setBadgeText({ text: "OFF" }),
       ])
-        .then(() => {
-          console.log("Badge set to OFF successfully");
-        })
+        .then(() => {})
         .catch((error) => {
           console.error("Error setting badge off:", error);
           // Retry một lần nữa
@@ -2131,23 +2160,11 @@ browserAPI.runtime.onConnect.addListener((port) => {
   });
 });
 
-// NEW: Set up periodic cleanup
-setInterval(() => {
-  if (messageHandler && messageHandler.cleanupOldRequests) {
-    messageHandler.cleanupOldRequests();
-  }
-}, 30000); // Every 30 seconds
-
 // Initialize extension
 const initializeExtension = async () => {
   try {
-    // Load proxy settings first
     await proxyRequestManager.loadSettings();
-
-    // Initialize proxy listener
     proxyRequestManager.initializeListener();
-
-    // ENHANCED: For Firefox, ensure proper state management
     if (IS_FIREFOX) {
       const currentState = await proxyRequestManager.loadFirefoxProxyState();
 
@@ -2204,36 +2221,24 @@ const initializeExtension = async () => {
   }
 };
 
-browserAPI.runtime.onStartup.addListener(() => {
+browserAPI.runtime.onStartup.addListener(async () => {
+  await badgeStateManager.init();
   initializeExtension();
 });
 
-browserAPI.runtime.onInstalled.addListener(() => {
+browserAPI.runtime.onInstalled.addListener(async () => {
+  await badgeStateManager.init();
   initializeExtension();
+});
+
+browserAPI.storage.onChanged.addListener((changes, namespace) => {
+  if (namespace === "local" && changes.proxyConnected) {
+    if (changes.proxyConnected.newValue === "true") {
+      badgeStateManager.setOn();
+    } else {
+      badgeStateManager.setOff();
+    }
+  }
 });
 
 initializeExtension();
-
-
-setInterval(async () => {
-  try {
-    // Check if proxy is actually active
-    const currentProxy = proxyRequestManager.getCurrentProxy();
-    const isProxyActive = currentProxy.isActive || 
-                         (IS_FIREFOX && currentProxy.firefoxProxyActive);
-    
-    // Get current badge text
-    const badgeText = await browserAPI.action.getBadgeText({});
-    
-    // Fix mismatch
-    if (!isProxyActive && badgeText === "ON") {
-      console.log("Badge state mismatch detected, fixing...");
-      proxyManager.setBadgeOff();
-    } else if (isProxyActive && badgeText === "OFF") {
-      console.log("Badge state mismatch detected, fixing...");
-      proxyManager.setBadgeOn();
-    }
-  } catch (error) {
-    // Ignore errors in periodic check
-  }
-}, 5000); // Check every 5 seconds
