@@ -111,7 +111,19 @@ class StorageManager {
         version: 1,
       };
       this.set(POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO, cachedData);
-    } catch (error) {}
+
+      // Also clear any expired timer flag when setting new proxy info
+      const savedTimer = this.get(
+        POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET,
+        true
+      );
+      if (savedTimer && savedTimer.expired) {
+        savedTimer.expired = false;
+        this.set(POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET, savedTimer);
+      }
+    } catch (error) {
+      console.error("Error setting cached proxy info:", error);
+    }
   }
 
   static getCachedProxyInfo() {
@@ -229,7 +241,207 @@ class StorageManager {
         expired: false,
       };
       this.set(POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET, timerData);
-    } catch (error) {}
+    } catch (error) {
+      console.error("StorageManager: Error setting timer", error);
+    }
+  }
+
+  static async getNextChangeTimerFromAllSources() {
+    try {
+      // 1. Check local storage saved timer
+      const savedTimer = this.get(
+        POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET,
+        true
+      );
+
+      // 2. Check browser local storage for background-saved timer
+      const browserData = await browserAPI.storage.local.get([
+        "nextChangeTarget",
+        "nextChangeDuration",
+        "nextChangeStartTime",
+        "fromAutoChange",
+        "autoChangeTimestamp",
+      ]);
+
+      // 3. Check cached proxy info
+      const cachedProxyInfo = await this.getCachedProxyInfo();
+
+      // 4. Check sync storage backup
+      const syncData = await browserAPI.storage.sync.get(["lastNextChangeIP"]);
+
+      // Determine most recent timer
+      let bestTimer = null;
+      let bestTimestamp = 0;
+
+      // Check saved timer
+      if (savedTimer && savedTimer.startTime > bestTimestamp) {
+        bestTimer = savedTimer;
+        bestTimestamp = savedTimer.startTime;
+      }
+
+      // Check browser storage timer
+      if (
+        browserData.nextChangeTarget &&
+        browserData.nextChangeTarget.startTime > bestTimestamp
+      ) {
+        bestTimer = browserData.nextChangeTarget;
+        bestTimestamp = browserData.nextChangeTarget.startTime;
+      } else if (
+        browserData.nextChangeStartTime &&
+        browserData.nextChangeStartTime > bestTimestamp
+      ) {
+        // Construct timer from separate fields
+        bestTimer = {
+          targetTime:
+            browserData.nextChangeStartTime +
+            browserData.nextChangeDuration * 1000,
+          duration: browserData.nextChangeDuration,
+          startTime: browserData.nextChangeStartTime,
+          fromAutoChange: browserData.fromAutoChange,
+          autoChangeTimestamp: browserData.autoChangeTimestamp,
+        };
+        bestTimestamp = browserData.nextChangeStartTime;
+      }
+
+      // Check cached proxy info
+      if (
+        cachedProxyInfo &&
+        cachedProxyInfo.lastAutoChangeTime &&
+        cachedProxyInfo.lastAutoChangeTime > bestTimestamp &&
+        cachedProxyInfo.nextChangeIP
+      ) {
+        bestTimer = {
+          targetTime:
+            cachedProxyInfo.lastAutoChangeTime +
+            cachedProxyInfo.nextChangeIP * 1000,
+          duration: cachedProxyInfo.nextChangeIP,
+          startTime: cachedProxyInfo.lastAutoChangeTime,
+          fromAutoChange: true,
+        };
+        bestTimestamp = cachedProxyInfo.lastAutoChangeTime;
+      }
+
+      // Check sync storage backup
+      if (
+        syncData.lastNextChangeIP &&
+        syncData.lastNextChangeIP.timestamp > bestTimestamp
+      ) {
+        bestTimer = {
+          targetTime:
+            syncData.lastNextChangeIP.timestamp +
+            syncData.lastNextChangeIP.value * 1000,
+          duration: syncData.lastNextChangeIP.value,
+          startTime: syncData.lastNextChangeIP.timestamp,
+          fromAutoChange: true,
+        };
+      }
+
+      if (bestTimer) {
+        const now = Date.now();
+        const remainingMs = bestTimer.targetTime - now;
+        const remainingSeconds = Math.floor(remainingMs / 1000);
+
+        return {
+          remainingSeconds: Math.max(0, remainingSeconds),
+          originalDuration: bestTimer.duration,
+          startTime: bestTimer.startTime,
+          targetTime: bestTimer.targetTime,
+          isExpired: remainingSeconds <= 0,
+          fromAutoChange: bestTimer.fromAutoChange,
+          autoChangeTimestamp: bestTimer.autoChangeTimestamp,
+        };
+      }
+
+      return null;
+    } catch (error) {
+      console.error(
+        "StorageManager: Error getting timer from all sources",
+        error
+      );
+      return null;
+    }
+  }
+
+  static async getLatestNextChangeIP() {
+    try {
+      // Check local storage first
+      const savedTimer = this.getNextChangeTimer();
+
+      // Check cached proxy info
+      const cachedProxyInfo = await this.getCachedProxyInfo();
+
+      // Check chrome storage
+      const chromeProxyInfo = await ChromeStorageManager.get(
+        POPUP_CONFIG.STORAGE_KEYS.TX_PROXY
+      );
+
+      // Get last auto change completion time
+      const lastAutoChange = this.get("lastAutoChangeCompletion", false);
+      const lastAutoChangeTime = lastAutoChange ? parseInt(lastAutoChange) : 0;
+
+      // Determine which source is most recent
+      let mostRecentSource = null;
+      let mostRecentTime = 0;
+
+      if (savedTimer && savedTimer.startTime > mostRecentTime) {
+        mostRecentTime = savedTimer.startTime;
+        mostRecentSource = "savedTimer";
+      }
+
+      if (cachedProxyInfo && cachedProxyInfo.timestamp > mostRecentTime) {
+        mostRecentTime = cachedProxyInfo.timestamp;
+        mostRecentSource = "cachedProxy";
+      }
+
+      if (
+        chromeProxyInfo &&
+        chromeProxyInfo.lastUpdateTimestamp > mostRecentTime
+      ) {
+        mostRecentTime = chromeProxyInfo.lastUpdateTimestamp;
+        mostRecentSource = "chromeStorage";
+      }
+
+      if (lastAutoChangeTime > mostRecentTime) {
+        mostRecentSource = "autoChange";
+      }
+
+      // Return appropriate timer data based on source
+      if (mostRecentSource === "savedTimer" && savedTimer) {
+        return savedTimer;
+      } else if (
+        (mostRecentSource === "cachedProxy" ||
+          mostRecentSource === "chromeStorage") &&
+        (cachedProxyInfo || chromeProxyInfo)
+      ) {
+        const proxyInfo =
+          mostRecentSource === "cachedProxy"
+            ? cachedProxyInfo
+            : chromeProxyInfo;
+        if (proxyInfo.nextChangeIP && proxyInfo.nextChangeIP > 0) {
+          // Create timer from proxy info
+          const now = Date.now();
+          const targetTime = mostRecentTime + proxyInfo.nextChangeIP * 1000;
+          const remainingSeconds = Math.max(
+            0,
+            Math.floor((targetTime - now) / 1000)
+          );
+
+          return {
+            remainingSeconds: remainingSeconds,
+            originalDuration: proxyInfo.nextChangeIP,
+            startTime: mostRecentTime,
+            targetTime: targetTime,
+            isExpired: remainingSeconds <= 0,
+            source: mostRecentSource,
+          };
+        }
+      }
+
+      return savedTimer; // Fallback to saved timer
+    } catch (error) {
+      console.error("Error getting latest nextChangeIP:", error);
+      return null;
+    }
   }
 
   static getNextChangeTimer() {
@@ -238,26 +450,35 @@ class StorageManager {
         POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET,
         true
       );
+
       if (timerData && timerData.targetTime) {
         const now = Date.now();
         const remainingMs = timerData.targetTime - now;
-        const remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
+        const remainingSeconds = Math.floor(remainingMs / 1000);
+
+        // Check if this is from recent activity
+        const isRecent =
+          timerData.startTime && now - timerData.startTime < 10000; // 10 seconds
+        const isFromAutoChange = timerData.fromAutoChange === true;
 
         return {
-          remainingSeconds: remainingSeconds,
+          remainingSeconds: Math.max(0, remainingSeconds),
           originalDuration: timerData.duration,
           startTime: timerData.startTime,
           targetTime: timerData.targetTime,
-          isExpired: remainingSeconds <= 0 || timerData.expired,
+          isExpired: remainingSeconds <= 0 && !isRecent,
           wasExpired: timerData.expired,
+          fromAutoChange: isFromAutoChange,
+          autoChangeTimestamp: timerData.autoChangeTimestamp,
+          source: timerData.source || "unknown",
         };
       }
       return null;
     } catch (error) {
+      console.error("Error getting next change timer:", error);
       return null;
     }
   }
-
   static markNextChangeTimerExpired() {
     try {
       const timerData = this.get(
@@ -276,6 +497,158 @@ class StorageManager {
     try {
       this.remove(POPUP_CONFIG.STORAGE_KEYS.NEXT_CHANGE_TARGET);
     } catch (error) {}
+  }
+
+  static async syncFromBrowserStorage() {
+    try {
+      // Check for cache update flag
+      const cacheUpdateFlag = await this.getBrowserStorageData(
+        "cacheUpdateFlag"
+      );
+      if (cacheUpdateFlag) {
+        // Get fresh data from browser storage
+        const freshProxyInfo = await this.getBrowserStorageData(
+          "cachedProxyInfo"
+        );
+        const freshTxProxy = await this.getBrowserStorageData("tx_proxy");
+
+        // Use the most recent data
+        let latestProxyInfo = null;
+        let latestTimestamp = 0;
+
+        if (freshProxyInfo && freshProxyInfo.timestamp > latestTimestamp) {
+          latestProxyInfo = freshProxyInfo.proxyInfo;
+          latestTimestamp = freshProxyInfo.timestamp;
+        }
+
+        if (
+          freshTxProxy &&
+          freshTxProxy.lastUpdateTimestamp > latestTimestamp
+        ) {
+          latestProxyInfo = freshTxProxy;
+          latestTimestamp = freshTxProxy.lastUpdateTimestamp;
+        }
+
+        if (latestProxyInfo) {
+          this.setCachedProxyInfo(latestProxyInfo);
+
+          // Clear the update flag
+          await this.setBrowserStorageData("cacheUpdateFlag", null);
+
+          return latestProxyInfo;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.error(
+        "StorageManager: Error syncing from browser storage:",
+        error
+      );
+      return null;
+    }
+  }
+
+  // NEW: Helper to get data from browser storage
+  static async getBrowserStorageData(key) {
+    try {
+      const result = await browserAPI.storage.local.get([key]);
+      return result[key] || null;
+    } catch (error) {
+      console.error(
+        "StorageManager: Error getting browser storage data:",
+        error
+      );
+      return null;
+    }
+  }
+
+  // NEW: Helper to set data to browser storage
+  static async setBrowserStorageData(key, value) {
+    try {
+      await browserAPI.storage.local.set({ [key]: value });
+    } catch (error) {
+      console.error(
+        "StorageManager: Error setting browser storage data:",
+        error
+      );
+    }
+  }
+
+  // ENHANCED getCachedProxyInfo with browser storage sync
+  static async getCachedProxyInfo() {
+    try {
+      // 1. First check for fresh data from browser storage
+      const freshData = await this.syncFromBrowserStorage();
+      if (freshData) {
+        return freshData;
+      }
+
+      // 2. Fall back to localStorage data
+      const cachedData = this.get(
+        POPUP_CONFIG.STORAGE_KEYS.CACHED_PROXY_INFO,
+        true
+      );
+
+      if (cachedData && cachedData.proxyInfo) {
+        const proxyInfo = cachedData.proxyInfo;
+
+        // Check expiration
+        const expiredInfo = this.checkProxyExpiration(proxyInfo);
+        if (expiredInfo.expired) {
+          this.clearCachedProxyInfo(expiredInfo.reason + " expired");
+          return {
+            expired: expiredInfo.reason,
+            error: expiredInfo.message,
+            expiredInfo: expiredInfo,
+          };
+        }
+
+        return proxyInfo;
+      }
+
+      return null;
+    } catch (error) {
+      console.error("StorageManager: Error getting cached proxy info:", error);
+      return null;
+    }
+  }
+
+  // NEW: Check proxy expiration (moved from inline logic)
+  static checkProxyExpiration(proxyInfo) {
+    if (!proxyInfo) {
+      return { expired: false, reason: null };
+    }
+
+    const currentTime = Math.floor(Date.now() / 1000);
+
+    // Check key expiration
+    if (proxyInfo.expired) {
+      const expiredTimestamp = TimeUtils.convertToTimestamp(proxyInfo.expired);
+      if (expiredTimestamp > 0 && currentTime >= expiredTimestamp) {
+        return {
+          expired: true,
+          reason: "key",
+          message: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED,
+        };
+      }
+    }
+
+    // Check proxy timeout
+    if (proxyInfo.proxyTimeout) {
+      const timeoutTimestamp = TimeUtils.convertToTimestamp(
+        proxyInfo.proxyTimeout
+      );
+      if (timeoutTimestamp > 0 && currentTime >= timeoutTimestamp) {
+        return {
+          expired: true,
+          reason: "proxy",
+          message: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED,
+        };
+      }
+    }
+
+    return { expired: false, reason: null };
   }
 }
 
@@ -468,6 +841,48 @@ class TimerManager {
     this.maxWaitAttempts = 30;
   }
 
+  async saveTimerState() {
+    if (!this.isPopupControlling) return;
+
+    const state = {
+      isRunning: !!this.timeChangeIP,
+      totalTimeChangeIp: this.totalTimeChangeIp,
+      originalDuration: this.originalDuration,
+      lastUpdateTime: Date.now(),
+      isPopupControlling: this.isPopupControlling,
+      isInitialized: this.isInitialized,
+    };
+
+    await browserAPI.storage.local.set({ popupTimerState: state });
+  }
+
+  async restoreTimerState() {
+    try {
+      const result = await browserAPI.storage.local.get(["popupTimerState"]);
+      const state = result.popupTimerState;
+
+      if (state && state.isRunning) {
+        const now = Date.now();
+        const elapsedSeconds = Math.floor((now - state.lastUpdateTime) / 1000);
+        const remainingTime = Math.max(
+          0,
+          state.totalTimeChangeIp - elapsedSeconds
+        );
+
+        if (remainingTime > 0) {
+          this.isPopupControlling = true;
+          this.isInitialized = true;
+          this.originalDuration = state.originalDuration;
+          this.startTimeChangeCountdownWithTime(remainingTime);
+          return true;
+        }
+      }
+    } catch (error) {
+      console.error("Error restoring timer state:", error);
+    }
+    return false;
+  }
+
   startTimeChangeCountdownWithTime(confirmedTime) {
     if (this.isProcessingExpiredTimer) return false;
 
@@ -478,6 +893,7 @@ class TimerManager {
     this.totalTimeChangeIp = confirmedTime;
     this.isPopupControlling = true;
     this.isInitialized = true;
+    this.originalDuration = confirmedTime; // Lưu original duration
 
     const element = document.getElementById(
       POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
@@ -491,6 +907,9 @@ class TimerManager {
       this.totalTimeChangeIp
     );
 
+    // Save timer state
+    this.saveTimerState();
+
     this.timeChangeIP = setInterval(async () => {
       const element = document.getElementById(
         POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
@@ -502,6 +921,9 @@ class TimerManager {
 
       element.value = `${this.totalTimeChangeIp}`;
       this.totalTimeChangeIp--;
+
+      // Save state mỗi giây
+      await this.saveTimerState();
 
       if (this.totalTimeChangeIp < 0) {
         this.clearTimeChangeCountdown();
@@ -694,6 +1116,9 @@ class TimerManager {
 
     this.stopSyncCheck();
     this.isProcessingExpiredTimer = false;
+
+    // Clear saved state
+    browserAPI.storage.local.remove(["popupTimerState"]);
   }
 
   clearAll() {
@@ -719,9 +1144,22 @@ class TimerManager {
       POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
     );
 
-    if (JSON.parse(isAutoChangeIP) && defaultTime) {
+    if (
+      JSON.parse(isAutoChangeIP) &&
+      defaultTime &&
+      ChangeIPManager.isChangeIPAllowed()
+    ) {
       const resetTime = parseInt(defaultTime);
       this.clearTimeChangeCountdown();
+
+      // Ensure input field is set immediately
+      const timeElement = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
+      );
+      if (timeElement) {
+        timeElement.value = resetTime;
+      }
+
       await this.sleep(200);
       this.startTimeChangeCountdownWithTime(resetTime);
       return true;
@@ -742,6 +1180,8 @@ class TimerManager {
       if (element) {
         element.innerText = "0 s";
       }
+      // Mark as expired when starting with 0
+      StorageManager.markNextChangeTimerExpired();
       return;
     }
 
@@ -760,15 +1200,18 @@ class TimerManager {
         return;
       }
 
-      element.innerText = `${this.countDowntime} s`;
-      this.countDowntime--;
-
-      if (this.countDowntime < 0) {
+      if (this.countDowntime <= 0) {
         element.innerText = "0 s";
+
+        // IMPORTANT: Mark timer as expired when countdown reaches 0
         StorageManager.markNextChangeTimerExpired();
+
         this.clearCountDown();
         return;
       }
+
+      element.innerText = `${this.countDowntime} s`;
+      this.countDowntime--;
 
       const remainingTime = Date.now() + this.countDowntime * 1000;
       StorageManager.setNextChangeTimer(remainingTime, this.countDowntime);
@@ -844,9 +1287,11 @@ class LocationManager {
       return false;
     }
 
-    const cachedProxyInfo = StorageManager.getCachedProxyInfo();
+    // Use async version to properly check expiration
+    const cachedProxyInfo = await StorageManager.getCachedProxyInfo();
 
     if (!cachedProxyInfo) {
+      // Không force disconnect ở đây, có thể đang load
       return false;
     }
 
@@ -857,9 +1302,13 @@ class LocationManager {
             error: POPUP_CONFIG.MESSAGES_TEXT.KEY_EXPIRED.replace("• ", ""),
           },
         });
-        setTimeout(async () => {
-          await this.forceDisconnectProxy("Key expired");
-        }, 1000);
+        // Clear timers and proxy state but keep error message visible
+        timerManager.clearAll();
+        UIManager.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT);
+        UIManager.enableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
+        
+        // Clear background proxy but don't change UI status
+        await this.silentProxyDisconnect("Key expired");
         return true;
       } else if (cachedProxyInfo.expired === "proxy") {
         UIManager.showError({
@@ -867,14 +1316,80 @@ class LocationManager {
             error: POPUP_CONFIG.MESSAGES_TEXT.PROXY_EXPIRED.replace("• ", ""),
           },
         });
-        setTimeout(async () => {
-          await this.forceDisconnectProxy("Proxy timeout");
-        }, 1000);
+        // Clear timers and proxy state but keep error message visible
+        timerManager.clearAll();
+        UIManager.disableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_DISCONNECT);
+        UIManager.enableButton(POPUP_CONFIG.UI_ELEMENTS.BTN_CONNECT);
+        
+        // Clear background proxy but don't change UI status
+        await this.silentProxyDisconnect("Proxy timeout");
         return true;
       }
     }
 
     return false;
+  }
+
+  static async silentProxyDisconnect(reason = "Unknown") {
+    try {
+      // Clear storage but don't change UI status message
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      StorageManager.clearCachedProxyInfo();
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP);
+
+      // Hide IP info but keep the error status message
+      const ipInfoElement = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.IP_INFO
+      );
+      if (ipInfoElement) {
+        ipInfoElement.style.display = "none";
+      }
+
+      const autoChangeCheckbox = document.getElementById(
+        POPUP_CONFIG.UI_ELEMENTS.IS_AUTO_CHANGE
+      );
+      if (autoChangeCheckbox) {
+        autoChangeCheckbox.checked = false;
+      }
+
+      // Set badge to Off
+      await BadgeManager.setBadgeOff();
+
+      const config = {
+        reason: reason,
+        timestamp: Date.now(),
+        browser: IS_FIREFOX ? "firefox" : "chrome",
+      };
+
+      // Clear background proxy settings
+      if (IS_FIREFOX) {
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.FORCE_DISCONNECT,
+          config
+        );
+        setTimeout(() => {
+          MessageHandler.sendToBackground(
+            POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+            config
+          );
+        }, 200);
+      } else {
+        MessageHandler.sendToBackground(
+          POPUP_CONFIG.BACKGROUND_MESSAGES.CANCEL_ALL,
+          config
+        );
+      }
+
+      await ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_PROXY, null);
+      await ChromeStorageManager.set(POPUP_CONFIG.STORAGE_KEYS.TX_CONF, config);
+    } catch (error) {
+      // Minimal error handling - just clear storage
+      StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
+      StorageManager.clearCachedProxyInfo();
+      await BadgeManager.setBadgeOff();
+    }
   }
 
   static async forceDisconnectProxy(reason = "Unknown") {
@@ -941,29 +1456,20 @@ class LocationManager {
     }
   }
 
-  static async getProxyInfoIfConnectedSafeNoAPI(preserveTimer = false) {
+ static async getProxyInfoIfConnectedSafeNoAPI(preserveTimer = false) {
     const proxyConnected = StorageManager.get(
       POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED
     );
 
     if (proxyConnected === "true") {
-      const cachedProxyInfo = StorageManager.getCachedProxyInfo();
+      // Use async version to get synced data
+      const cachedProxyInfo = await StorageManager.getCachedProxyInfo();
 
       if (cachedProxyInfo) {
         if (cachedProxyInfo.expired) {
-          const statusElement = document.getElementById(
-            POPUP_CONFIG.UI_ELEMENTS.PROXY_STATUS
-          );
-          if (statusElement) {
-            statusElement.innerText = cachedProxyInfo.error;
-            statusElement.classList.remove(
-              POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS
-            );
-            statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-          }
+          // Error already handled by checkAndHandleExpiration, just return
           return;
         }
-
         UIManager.showProxyInfo(cachedProxyInfo, false, preserveTimer);
         ProxyManager.updateProxyUIStatus();
 
@@ -1480,8 +1986,13 @@ class ProxyManager {
   }
 
   static async handleSuccessfulConnection(proxyData, preserveTimer = false) {
-    if (!preserveTimer) {
-      timerManager.clearAll();
+    // Always update nextChangeIP timer if we have new data
+    if (proxyData.nextChangeIP && proxyData.nextChangeIP > 0) {
+      // Clear old timer
+      StorageManager.clearNextChangeTimer();
+      // Set new timer
+      const targetTime = Date.now() + proxyData.nextChangeIP * 1000;
+      StorageManager.setNextChangeTimer(targetTime, proxyData.nextChangeIP);
     }
 
     const currentTime = Math.floor(Date.now() / 1000);
@@ -1520,6 +2031,9 @@ class ProxyManager {
     }
 
     setTimeout(async () => {
+      // IMPORTANT: Add connection timestamp to proxy data
+      proxyData.connectionTimestamp = Date.now();
+
       StorageManager.setCachedProxyInfo(proxyData);
       UIManager.showProxyInfo(proxyData, false, preserveTimer);
       await this.updateProxyUIStatus();
@@ -1528,30 +2042,65 @@ class ProxyManager {
       await BadgeManager.setBadgeOn();
       await BadgeManager.lockBadgeState(10000);
 
-      if (!preserveTimer) {
-        const isAutoChangeIP = StorageManager.get(
-          POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
-        );
-        const timeAutoChangeIPDefault = StorageManager.get(
-          POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
-        );
+      // Handle timers
+      const isAutoChangeIP = StorageManager.get(
+        POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
+      );
+      const timeAutoChangeIPDefault = StorageManager.get(
+        POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
+      );
 
-        if (
-          JSON.parse(isAutoChangeIP) &&
-          timeAutoChangeIPDefault &&
-          ChangeIPManager.isChangeIPAllowed()
-        ) {
+      // Start nextChangeIP countdown
+      if (proxyData.nextChangeIP && proxyData.nextChangeIP > 0) {
+        timerManager.setCountDowntime(proxyData.nextChangeIP);
+        timerManager.startCountDown();
+      }
+
+      // Start auto change timer if enabled
+      if (JSON.parse(isAutoChangeIP) && ChangeIPManager.isChangeIPAllowed()) {
+        // Check if this is from auto-change completion
+        const isAutoChangeCompletion =
+          proxyData.autoChangeCompleted ||
+          proxyData.cacheSource === "autoChangeIP" ||
+          !preserveTimer;
+
+        if (timeAutoChangeIPDefault) {
           const defaultTime = Number(timeAutoChangeIPDefault);
           StorageManager.set(
             POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
             defaultTime
           );
+
+          // Ensure input field is updated immediately
+          const timeElement = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
+          );
+          if (timeElement) {
+            timeElement.value = defaultTime;
+          }
+
           timerManager.startTimeChangeCountdownWithTime(defaultTime);
         } else {
-          if (proxyData.nextChangeIP && proxyData.nextChangeIP > 0) {
-            timerManager.setCountDowntime(proxyData.nextChangeIP);
-            timerManager.startCountDown();
+          // Auto-change is enabled but no default time set - use fallback
+          const fallbackTime = 60; // Default 60 seconds
+          StorageManager.set(
+            POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP,
+            fallbackTime
+          );
+          StorageManager.set(
+            POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT,
+            fallbackTime
+          );
+
+          // Ensure input field is updated immediately
+          const timeElement = document.getElementById(
+            POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
+          );
+          if (timeElement) {
+            timeElement.value = fallbackTime;
           }
+
+          timerManager.startTimeChangeCountdownWithTime(fallbackTime);
         }
       }
     }, 100);
@@ -1567,7 +2116,7 @@ class ProxyManager {
 
   static async directProxy(reason) {
     timerManager.clearAll();
-
+    StorageManager.clearNextChangeTimer();
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_INFO);
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.PROXY_CONNECTED);
     StorageManager.remove(POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP);
@@ -1681,11 +2230,13 @@ class AppInitializer {
       timerManager.clearAll();
       UIManager.setNotConnectedStatus();
 
+      // CRITICAL: Check expired first, before anything else
       const expiredHandled = await LocationManager.checkAndHandleExpiration();
       if (expiredHandled) {
         return;
       }
 
+      // Check background status
       const backgroundStatus = await this.checkBackgroundStatus();
 
       if (backgroundStatus.status === "error") {
@@ -1705,6 +2256,7 @@ class AppInitializer {
 
       await this.continueInitialization(backgroundStatus.data);
     } catch (error) {
+      console.error("AppInitializer: Error during initialization:", error);
       this.showInitializationError();
     } finally {
       this.isInitializing = false;
@@ -1813,7 +2365,6 @@ class AppInitializer {
       }
 
       ChangeIPManager.init();
-
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       const proxyConnected = StorageManager.get(
@@ -1821,18 +2372,131 @@ class AppInitializer {
       );
 
       if (proxyConnected === "true") {
-        // Update badge to On if connected
         await BadgeManager.setBadgeOn();
 
+        // CRITICAL: Sync data from browser storage before proceeding
+        await StorageManager.syncFromBrowserStorage();
+
+        // Check expiration after sync
         const expiredHandled = await LocationManager.checkAndHandleExpiration();
-        if (!expiredHandled) {
-          await LocationManager.getProxyInfoIfConnectedSafeNoAPI(false);
+        if (expiredHandled) {
+          return;
+        }
+
+        // Load proxy info (will use synced data)
+        await LocationManager.getProxyInfoIfConnectedSafeNoAPI(false);
+
+        // Get fresh cached info after sync
+        const cachedProxyInfo = await StorageManager.getCachedProxyInfo();
+        if (cachedProxyInfo && !cachedProxyInfo.expired) {
+          // Timer restoration logic
+          const latestTimer =
+            await StorageManager.getNextChangeTimerFromAllSources();
+
+          if (latestTimer) {
+            if (latestTimer.remainingSeconds > 0) {
+              timerManager.setCountDowntime(latestTimer.remainingSeconds);
+              timerManager.startCountDown();
+            } else {
+              const nextTimeElement = document.getElementById(
+                POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
+              );
+              if (nextTimeElement) {
+                nextTimeElement.innerText = "0 s";
+              }
+              StorageManager.markNextChangeTimerExpired();
+            }
+          } else {
+            const proxyTimestamp =
+              cachedProxyInfo.timestamp ||
+              cachedProxyInfo.connectionTimestamp ||
+              cachedProxyInfo.lastUpdateTimestamp ||
+              0;
+            const currentTime = Date.now();
+            const timeSinceProxyUpdate = currentTime - proxyTimestamp;
+            const isFreshConnection = timeSinceProxyUpdate < 300000; // 5 minutes
+
+            if (
+              isFreshConnection &&
+              cachedProxyInfo.nextChangeIP &&
+              cachedProxyInfo.nextChangeIP > 0
+            ) {
+              timerManager.setCountDowntime(cachedProxyInfo.nextChangeIP);
+              timerManager.startCountDown();
+            } else {
+              const nextTimeElement = document.getElementById(
+                POPUP_CONFIG.UI_ELEMENTS.NEXT_TIME
+              );
+              if (nextTimeElement) {
+                nextTimeElement.innerText = "0 s";
+              }
+            }
+          }
+        }
+
+        // Auto change timer restoration
+        const isAutoChangeIP = StorageManager.get(
+          POPUP_CONFIG.STORAGE_KEYS.IS_AUTO_CHANGE_IP
+        );
+
+        if (JSON.parse(isAutoChangeIP) && ChangeIPManager.isChangeIPAllowed()) {
+          if (backgroundData && backgroundData.isActive) {
+            const remainingTime =
+              backgroundData.calculatedRemainingTime ||
+              backgroundData.remainingTime;
+            if (remainingTime > 0) {
+              timerManager.startTimeChangeCountdownWithTime(remainingTime);
+            } else {
+              const defaultTime = StorageManager.get(
+                POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
+              );
+              if (defaultTime) {
+                timerManager.startTimeChangeCountdownWithTime(
+                  parseInt(defaultTime)
+                );
+              }
+            }
+          } else {
+            const restored = await timerManager.restoreTimerState();
+            if (!restored) {
+              const defaultTime = StorageManager.get(
+                POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
+              );
+              if (defaultTime) {
+                timerManager.startTimeChangeCountdownWithTime(
+                  parseInt(defaultTime)
+                );
+              } else {
+                const fallbackTime = 60;
+                StorageManager.set(
+                  POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT,
+                  fallbackTime
+                );
+                timerManager.startTimeChangeCountdownWithTime(fallbackTime);
+              }
+            }
+          }
+
+          const currentTimeValue =
+            StorageManager.get(POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP) ||
+            StorageManager.get(
+              POPUP_CONFIG.STORAGE_KEYS.TIME_AUTO_CHANGE_IP_DEFAULT
+            );
+
+          if (currentTimeValue) {
+            const timeElement = document.getElementById(
+              POPUP_CONFIG.UI_ELEMENTS.TIME_CHANGE_IP
+            );
+            if (timeElement) {
+              timeElement.value = currentTimeValue;
+            }
+          }
         }
       } else {
-        // Update badge to Off if not connected
         await BadgeManager.setBadgeOff();
       }
     } catch (error) {
+      console.error("AppInitializer: Error in initialization:", error);
       this.showInitializationError();
     }
   }

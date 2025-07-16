@@ -813,6 +813,38 @@ class AutoChangeManager {
     }
   }
 
+  getDetailedStatus() {
+    const now = Date.now();
+    const status = {
+      isActive: this.isRunning,
+      remainingTime: this.remainingTime,
+      originalDuration: this.originalDuration,
+      isChangingIP: this.isChangingIP,
+      isProtected: this.isProtected,
+      executionMutex: this.executionMutex,
+      config: this.config
+        ? {
+            hasApiKey: !!this.config.apiKey,
+            location: this.config.location,
+            timeAutoChangeIP: this.config.timeAutoChangeIP,
+          }
+        : null,
+      lastChangeTime: this.lastChangeTime,
+      startTime: this.startTime,
+      lastUpdateTime: this.lastUpdateTime,
+      currentTime: now,
+      // Thêm calculated remaining time
+      calculatedRemainingTime: this.isRunning
+        ? Math.max(
+            0,
+            this.remainingTime - Math.floor((now - this.lastUpdateTime) / 1000)
+          )
+        : 0,
+    };
+
+    return status;
+  }
+
   scheduleTimer() {
     if (!this.isRunning || !this.config) {
       return;
@@ -932,10 +964,8 @@ class AutoChangeManager {
     }
   }
 
-  // NEW: Handle successful IP change
   async handleSuccessfulIPChange(result) {
     try {
-      // CRITICAL: Validate config before building proxy info
       if (!this.validateConfig()) {
         console.error(
           "AutoChangeManager: Config invalid during success handling"
@@ -950,13 +980,18 @@ class AutoChangeManager {
         this.config.proxyType
       );
 
+      await browserAPI.storage.local.remove(["nextChangeExpired"]);
+
+      // Update storage with new proxy info INCLUDING nextChangeIP
+      proxyInfo.nextChangeIP = result.data.nextChangeIP;
+      proxyInfo.lastAutoChangeTime = Date.now();
+
+      await this.updateStorageWithProxyInfo(proxyInfo);
+
       // Set proxy settings
       await proxyManager.setProxySettings(proxyInfo);
 
-      // Update storage
-      await this.updateStorageWithProxyInfo(proxyInfo);
-
-      // Sync nextChangeIP timer
+      // CRITICAL: Sync nextChangeIP timer AFTER proxy is set
       await this.syncNextChangeIPTimer(result.data);
 
       // Reset auto change timer for next cycle
@@ -965,7 +1000,7 @@ class AutoChangeManager {
       this.lastUpdateTime = Date.now();
       await this.saveState();
 
-      // Notify popup
+      // Notify popup with preserveTimer: false to force new timer
       this.sendToPopup("successGetProxyInfo", {
         ...proxyInfo,
         isAutoChanging: false,
@@ -973,6 +1008,8 @@ class AutoChangeManager {
         updateCache: true,
         cacheSource: "autoChangeIP",
         autoChangeCompleted: true,
+        preserveTimer: false, // Force popup to use new timer
+        nextChangeIP: result.data.nextChangeIP, // Ensure this is included
       });
 
       // Continue auto change cycle if still running
@@ -987,7 +1024,6 @@ class AutoChangeManager {
       await this.handleIPChangeError(error);
     }
   }
-
   // NEW: Handle failed IP change
   async handleFailedIPChange(result) {
     const error =
@@ -1029,36 +1065,81 @@ class AutoChangeManager {
     }
   }
 
-  // NEW: Update storage with proxy info
   async updateStorageWithProxyInfo(proxyInfo) {
     try {
-      // Update chrome.storage.sync (main bridge to popup)
+      const enhancedProxyInfo = {
+        ...proxyInfo,
+        lastUpdateTimestamp: Date.now(),
+        autoChangeActive: this.isRunning,
+        source: "auto_change_background",
+      };
+
+      // Save to sync storage
       await browserAPI.storage.sync.set({
-        [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
+        [CONFIG.STORAGE_KEYS.TX_PROXY]: enhancedProxyInfo,
+      });
+
+      // Save to local storage with cache update flag
+      await browserAPI.storage.local.set({
+        proxyInfo: enhancedProxyInfo,
+        lastProxyUpdate: Date.now(),
+        cachedProxyInfo: {
+          proxyInfo: enhancedProxyInfo,
+          timestamp: Date.now(),
+          version: 1,
+          source: "autoChangeIP",
+        },
+        // CRITICAL: Set cache update flag for popup sync
         cacheUpdateFlag: {
           timestamp: Date.now(),
           source: "autoChangeIP",
-          proxyInfo: proxyInfo,
+          proxyInfo: enhancedProxyInfo,
           needsLocalStorageUpdate: true,
           reason: "Auto change IP completed while popup closed",
         },
       });
 
-      // Update chrome.storage.local (backup + immediate access)
-      await browserAPI.storage.local.set({
-        proxyInfo: proxyInfo,
-        lastProxyUpdate: Date.now(),
-        cachedProxyInfo: {
-          proxyInfo: proxyInfo,
-          timestamp: Date.now(),
-          version: 1,
-          source: "autoChangeIP",
-        },
-      });
+      console.log("Background: Cache update flag set for popup sync");
+
+      if (proxyInfo.nextChangeIP && proxyInfo.nextChangeIP > 0) {
+        await this.syncNextChangeIPTimerEnhanced(proxyInfo.nextChangeIP);
+      }
     } catch (cacheError) {
+      console.error("Background: Error updating proxy cache:", cacheError);
+    }
+  }
+
+  async syncNextChangeIPTimerEnhanced(nextChangeIPSeconds) {
+    if (!nextChangeIPSeconds || nextChangeIPSeconds <= 0) {
+      console.log("AutoChangeManager: No valid nextChangeIP value to sync");
+      return;
+    }
+
+    try {
+      const currentTime = Date.now();
+      const nextChangeTarget = currentTime + nextChangeIPSeconds * 1000;
+
+      const timerData = {
+        targetTime: nextChangeTarget,
+        duration: nextChangeIPSeconds,
+        startTime: currentTime,
+        version: 1,
+        expired: false,
+        fromAutoChange: true,
+        autoChangeTimestamp: currentTime,
+        source: "auto_change_background",
+      };
+
+      // Save to local storage
+      await browserAPI.storage.local.set({
+        nextChangeTarget: timerData,
+        nextChangeTimestamp: currentTime,
+        lastAutoChangeCompletion: currentTime,
+      });
+    } catch (error) {
       console.error(
-        "AutoChangeManager: ❌ Error updating proxy cache:",
-        cacheError
+        "AutoChangeManager: Error syncing nextChangeIP timer:",
+        error
       );
     }
   }
@@ -1069,12 +1150,44 @@ class AutoChangeManager {
       try {
         const currentTime = Date.now();
         const nextChangeTarget = currentTime + data.nextChangeIP * 1000;
+
+        console.log("AutoChangeManager: Syncing nextChangeIP timer:", {
+          duration: data.nextChangeIP,
+          targetTime: new Date(nextChangeTarget).toLocaleTimeString(),
+          currentTime: new Date(currentTime).toLocaleTimeString(),
+        });
+
+        // Save timer data in the exact format popup expects
+        const timerData = {
+          targetTime: nextChangeTarget,
+          duration: data.nextChangeIP,
+          startTime: currentTime,
+          version: 1,
+          expired: false,
+          fromAutoChange: true,
+          autoChangeTimestamp: currentTime,
+        };
+
+        // Save to localStorage format that popup expects
         await browserAPI.storage.local.set({
-          nextChangeTarget: nextChangeTarget,
+          nextChangeTarget: timerData,
           nextChangeDuration: data.nextChangeIP,
           nextChangeStartTime: currentTime,
           nextChangeExpired: false,
+          fromAutoChange: true,
+          autoChangeTimestamp: currentTime,
         });
+
+        // Also save as a backup in sync storage
+        await browserAPI.storage.sync.set({
+          lastNextChangeIP: {
+            value: data.nextChangeIP,
+            timestamp: currentTime,
+            source: "autoChangeIP",
+          },
+        });
+
+        console.log("AutoChangeManager: NextChangeIP timer saved successfully");
       } catch (error) {
         console.error("AutoChangeManager: Error synchronizing timers:", error);
       }
@@ -1422,6 +1535,11 @@ class MessageHandler {
 
     try {
       switch (request.greeting) {
+        case "getBackgroundTimerStatus":
+          const detailedStatus = autoChangeManager.getDetailedStatus();
+          sendResponse(detailedStatus);
+          break;
+
         case "ping":
           sendResponse({ pong: true });
           break;
@@ -1913,6 +2031,8 @@ class MainProxyManager {
     }
 
     const proxyInfo = await this.buildProxyInfo(response, apiKey, proxyType);
+
+    // Save to both sync and local storage
     await browserAPI.storage.sync.set({
       [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
       cacheUpdateFlag: {
@@ -1933,14 +2053,6 @@ class MainProxyManager {
       },
     });
 
-    try {
-      messageHandler.sendToPopup("successGetProxyInfo", {
-        ...proxyInfo,
-        updateCache: true,
-        cacheSource: "background_while_closed",
-      });
-    } catch (error) {}
-
     if (!proxyInfo.public_ip || !proxyInfo.port) {
       this.setBadgeOff();
       await browserAPI.storage.local.set({ proxyConnected: "false" });
@@ -1953,17 +2065,28 @@ class MainProxyManager {
 
     await this.setProxySettings(proxyInfo);
 
-    try {
-      await browserAPI.storage.sync.set({
-        [CONFIG.STORAGE_KEYS.TX_PROXY]: proxyInfo,
-        cacheUpdateFlag: {
-          timestamp: Date.now(),
-          source: "proxyResponse",
-          proxyInfo: proxyInfo,
-        },
+    // CRITICAL: Sync nextChangeIP timer for ALL proxy responses
+    if (proxyInfo.nextChangeIP && proxyInfo.nextChangeIP > 0) {
+      const targetTime = Date.now() + proxyInfo.nextChangeIP * 1000;
+
+      const timerData = {
+        targetTime: targetTime,
+        duration: proxyInfo.nextChangeIP,
+        startTime: Date.now(),
+        version: 1,
+        expired: false,
+        source: "proxy_response",
+      };
+
+      await browserAPI.storage.local.set({
+        nextChangeTarget: timerData,
+        nextChangeTimestamp: Date.now(),
       });
-    } catch (error) {
-      console.error("MainProxyManager: Error updating proxy cache:", error);
+
+      console.log(
+        "MainProxyManager: NextChangeIP timer set:",
+        proxyInfo.nextChangeIP
+      );
     }
 
     const autoChangeStatus = autoChangeManager.getStatus();
