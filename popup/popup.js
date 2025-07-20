@@ -1873,7 +1873,7 @@ class BadgeManager {
       }
 
       await browserAPI.action.setBadgeText({ text: "On" });
-      await browserAPI.action.setBadgeBackgroundColor({ color: "#00ff00" });
+      await browserAPI.action.setBadgeBackgroundColor({ color: [36, 162, 36, 255] });
 
       // Notify background to not change badge
       await browserAPI.storage.local.set({
@@ -1895,7 +1895,7 @@ class BadgeManager {
       }
 
       await browserAPI.action.setBadgeText({ text: "Off" });
-      await browserAPI.action.setBadgeBackgroundColor({ color: "#ff0000" });
+      await browserAPI.action.setBadgeBackgroundColor({ color: [162, 36, 36, 255] });
 
       // Notify background to not change badge
       await browserAPI.storage.local.set({
