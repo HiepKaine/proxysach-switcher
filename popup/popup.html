@@ -3,16 +3,22 @@
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <title>VNProxy Settings</title>
+    <title>ProxySach Settings</title>
     <meta name="description" content="" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="stylesheet" href="popup.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bai+Jamjuree:ital,wght@0,200;0,300;0,400;0,500;0,600;0,700;1,200;1,300;1,400;1,500;1,600;1,700&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=Lexend+Deca:wght@100..900&family=Mona+Sans:ital,wght@0,200..900;1,200..900&display=swap"
+      rel="stylesheet"
+    />
     <script type="module" src="popup.js"></script>
   </head>
 
-  <body class="px-0 bg-slate-200">
+  <body>
     <header class="gtx-header">
-      <img src="/images/logo.png" alt="" style="width: 40%; height: 70%" />
+      <img src="/images/logo.svg" alt="" style="width: 40%; height: 70%" />
     </header>
     <div class="relative p-2" id="body">
       <div class="grid">
@@ -20,8 +26,8 @@
           <div class="lg:mt-5">
             <div class="flex flex-col-reverse xl:flex-row flex-col">
               <div class="flex-1 xl:mt-0">
-                <div class="d-flex" style="margin-bottom: 8px">
-                  <label>Trạng thái: </label>
+                <div class="d-flex" style="margin-bottom: 32px">
+                  <label class="status">Trạng thái: </label>
                   <span id="proxy-status" class="text-danger"
                     >• Chưa kết nối</span
                   >
@@ -80,10 +86,10 @@
                       </div>
                       <div
                         class="container-change-ip"
-                        style="margin-right: 8px; margin-top: 8px"
+                        style="margin-bottom: 24px"
                       >
-                        <div class="flex-s">
-                          <label>Tự động đổi IP: </label>
+                        <div class="flex-s d-flex">
+                          <label class="switch-label">Tự động đổi IP: </label>
                           <label class="switch">
                             <input
                               id="is-auto-change"
@@ -107,10 +113,16 @@
                           />
                         </div>
                       </div>
-                      <div class="mb-32">
-                        <label>Loại IP muốn dùng</label>
-                        <div class="flex flex-row mt-2">
-                          <div class="form-check mr-4">
+                      <div class="mb-32" style="margin-bottom: 24px">
+                        <label class="switch-label">Loại IP muốn dùng:</label>
+                        <div
+                          class="d-flex flex-row mt-2 mb-32"
+                          style="margin-left: 10px"
+                        >
+                          <div
+                            class="form-check d-flex mr-4"
+                            style="margin-right: 10px"
+                          >
                             <input
                               id="radio-switch-5"
                               class="form-check-input"
@@ -123,7 +135,7 @@
                               >IPv4</label
                             >
                           </div>
-                          <div class="form-check mr-4 sm:mt-0">
+                          <div class="form-check d-flex mr-4 sm:mt-0">
                             <input
                               id="radio-switch-5"
                               class="form-check-input"
@@ -137,10 +149,16 @@
                           </div>
                         </div>
                       </div>
-                      <div class="mb-32">
-                        <label>Thay đổi IP</label>
-                        <div class="flex flex-row mt-2">
-                          <div class="form-check mr-3">
+                      <div class="mb-32" style="margin-bottom: 24px">
+                        <label class="switch-label">Thay đổi IP:</label>
+                        <div
+                          class="d-flex flex-row mt-2 mb-32"
+                          style="margin-left: 10px"
+                        >
+                          <div
+                            class="d-flex align-items-center mr-4"
+                            style="margin-right: 10px"
+                          >
                             <input
                               id="radio-switch-change-ip"
                               class="form-check-input"
@@ -154,7 +172,7 @@
                               >Đổi IP mới</label
                             >
                           </div>
-                          <div class="form-check mr-3 sm:mt-0">
+                          <div class="d-flex align-items-center mr-4 sm:mt-0">
                             <input
                               id="radio-switch-change-ip"
                               class="form-check-input"
@@ -171,8 +189,15 @@
                           </div>
                         </div>
                       </div>
-                      <div class="mb-32" id="location_area">
-                        <label for="location_key" class="form-label"
+                      <div
+                        class="mb-32"
+                        id="location_area"
+                        style="margin-bottom: 24px"
+                      >
+                        <label
+                          for="location_key"
+                          class="form-label switch-label d-flex w-100"
+                          style="margin-bottom: 8px"
                           >Địa điểm:</label
                         >
                         <select
@@ -183,8 +208,13 @@
                           <option value="">Tất cả</option>
                         </select>
                       </div>
-                      <div>
-                        <label for="api_key" class="form-label">API Key:</label>
+                      <div class="mb-32" id="location_area">
+                        <label
+                          for="api_key"
+                          class="form-label switch-label"
+                          style="margin-bottom: 8px"
+                          >API Key:</label
+                        >
                         <input
                           id="api_key"
                           type="text"
@@ -199,17 +229,18 @@
                   <div class="button-action">
                     <button
                       type="button"
-                      class="btn btn-success text-end text-white mt-3 mr-2"
-                      id="btn-connect"
-                    >
-                      Kết nối
-                    </button>
-                    <button
-                      type="button"
                       class="btn btn-danger text-end mt-3"
                       id="btn-disconnect"
                     >
                       Hủy kết nối
+                    </button>
+
+                    <button
+                      type="button"
+                      class="btn btn-success text-end text-white mt-3 mr-2"
+                      id="btn-connect"
+                    >
+                      Kết nối
                     </button>
                   </div>
                 </form>

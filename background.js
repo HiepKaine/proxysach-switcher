@@ -5,7 +5,7 @@ if (browserAPI.browserAction && !browserAPI.action) {
 
 // Constants
 const CONFIG = {
-  SERVER_URL: "https://api.vnproxy.com",
+  SERVER_URL: "https://api.proxysach.com",
   ENDPOINTS: {
     STATUS_IP: "/webservice/statusIP",
     CHANGE_IP: "/webservice/changeIP",

@@ -1,2 +1,2 @@
-# Vnproxy-Switcher-
-Extension Vnproxy Switcher 
+# ProxySach-Switcher-
+Extension ProxySach Switcher 

@@ -61,6 +61,7 @@ const POPUP_CONFIG = {
   CSS_CLASSES: {
     TEXT_DANGER: "text-danger",
     TEXT_SUCCESS: "text-success",
+    TEXT_WARNING: "text-warning",
   },
   MESSAGES_TEXT: {
     NOT_CONNECTED: "• Chưa kết nối",
@@ -1525,7 +1526,8 @@ class UIManager {
     );
     statusElement.innerText = POPUP_CONFIG.MESSAGES_TEXT.CONNECTING;
     statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
-    statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
+    statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
+    statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_WARNING);
   }
 
   static showProcessingNewIpConnect() {
@@ -1615,6 +1617,7 @@ class UIManager {
     );
     statusElement.innerText = POPUP_CONFIG.MESSAGES_TEXT.NOT_CONNECTED;
     statusElement.classList.add(POPUP_CONFIG.CSS_CLASSES.TEXT_DANGER);
+    statusElement.classList.remove(POPUP_CONFIG.CSS_CLASSES.TEXT_SUCCESS);
   }
 
   static setNotConnectedStatus() {
